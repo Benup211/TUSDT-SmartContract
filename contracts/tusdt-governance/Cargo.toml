@@ -1,0 +1,24 @@
+[package]
+name = "tusdt-governance"
+version = "0.1.0"
+authors = ["tensorusd admin@tensorusd.com"]
+edition = "2021"
+
+[dependencies]
+ink = { workspace = true, default-features = false }
+tusdt-env = { path = "../../env", default-features = false }
+tusdt-treasury = { path = "../tusdt-treasury", default-features = false, features = [
+    "ink-as-dependency",
+] }
+
+[dev-dependencies]
+ink_e2e = { workspace = true }
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["std"]
+std = ["ink/std", "tusdt-env/std", "tusdt-treasury/std"]
+ink-as-dependency = []
+e2e-tests = []

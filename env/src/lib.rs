@@ -163,13 +163,13 @@ impl ink::env::Environment for CustomEnvironment {
 
 #[ink::scale_derive(Encode, Decode, TypeInfo)]
 pub struct StakeInfo<AccountId> {
-    hotkey: AccountId,
-    coldkey: AccountId,
-    netuid: Compact<u16>,
-    stake: Compact<u64>,
-    locked: Compact<u64>,
-    emission: Compact<u64>,
-    tao_emission: Compact<u64>,
-    drain: Compact<u64>,
-    is_registered: bool,
+    pub hotkey: AccountId,
+    pub coldkey: AccountId,
+    pub netuid: Compact<u16>,
+    pub stake: Compact<u64>,
+    pub locked: Compact<u64>,
+    pub emission: Compact<u64>,
+    pub tao_emission: Compact<u64>,
+    pub drain: Compact<u64>,
+    pub is_registered: bool,
 }
