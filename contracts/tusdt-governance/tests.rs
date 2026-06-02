@@ -63,7 +63,8 @@ fn set_caller(caller: ink::primitives::AccountId) {
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(caller);
 }
 
-fn make_governance() -> TusdtGovernance {
+/// Constructs governance with the test clock/stake set, but no snapshot submitted yet.
+fn make_governance_no_snapshot() -> TusdtGovernance {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
     // Default the proposer's stake above the floor; individual tests can re-register.
@@ -73,10 +74,34 @@ fn make_governance() -> TusdtGovernance {
     TusdtGovernance::new(accounts.django)
 }
 
+/// Constructs governance and commits an initial empty snapshot (epoch 1, zero root, zero supply)
+/// so proposals can be submitted. Voting tests submit their own snapshot with a real root.
+fn make_governance() -> TusdtGovernance {
+    let mut gov = make_governance_no_snapshot();
+    gov.submit_snapshot([0u8; 32], 0, 0).expect("snapshot ok");
+    gov
+}
+
+/// Commits a snapshot whose Merkle tree holds exactly one leaf for `(coldkey, hotkey, balance,
+/// multiplier_bps)`. For a single-leaf tree the root is the leaf and the proof is empty. Returns
+/// the new epoch.
+fn submit_single_leaf_snapshot(
+    gov: &mut TusdtGovernance,
+    coldkey: ink::primitives::AccountId,
+    hotkey: ink::primitives::AccountId,
+    balance: u128,
+    multiplier_bps: u32,
+    circulating_supply: u128,
+) -> u64 {
+    let root = leaf_hash(coldkey, hotkey, balance, multiplier_bps);
+    gov.submit_snapshot(root, circulating_supply, 0)
+        .expect("snapshot ok")
+}
+
 #[ink::test]
 fn constructor_sets_admin_and_defaults() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
-    let gov = make_governance();
+    let gov = make_governance_no_snapshot();
     assert_eq!(gov.admin(), accounts.alice);
     assert_eq!(gov.proposal_count(), 0);
     let p = gov.params();
@@ -87,9 +112,18 @@ fn constructor_sets_admin_and_defaults() {
     assert_eq!(p.min_proposer_stake, 1_000_000_000_000);
     assert_eq!(p.submission_open_day, 5);
     assert_eq!(p.submission_close_day, 25);
-    // No snapshot yet → no circulating supply → quorum threshold of zero.
-    assert_eq!(gov.circulating_supply(), 0);
-    assert_eq!(gov.quorum(), 0);
+    // No snapshot yet → no epoch, no snapshot record, quorum threshold of zero.
+    assert_eq!(gov.current_epoch(), 0);
+    assert!(gov.get_snapshot(1).is_none());
+    assert_eq!(gov.quorum(1), 0);
+}
+
+#[ink::test]
+fn submit_proposal_rejects_without_snapshot() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance_no_snapshot();
+    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
+    assert_eq!(res, Err(Error::NoSnapshot));
 }
 
 #[ink::test]
@@ -339,22 +373,80 @@ fn integer_sqrt_floors_correctly() {
 }
 
 #[ink::test]
-fn vote_weight_is_sqrt_of_stake() {
+fn vote_weight_is_sqrt_of_balance() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
 
-    // 4e12 raw stake clears the 1e12 proposer floor, and sqrt(4e12) = 2_000_000.
-    register_stake(Some(4_000_000_000_000));
+    // Single-leaf snapshot: balance 4e12, 1.0x multiplier. sqrt(4e12) = 2_000_000.
+    let balance = 4_000_000_000_000;
+    submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 10_000, 0);
     let id = gov
         .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
         .expect("submit ok");
 
-    gov.vote(id, accounts.bob, true).expect("vote ok");
+    gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
+        .expect("vote ok");
 
     let proposal = gov.get_proposal(id).unwrap();
-    // With the 1.0x time-staked multiplier, weight == sqrt(stake).
+    // With the 1.0x time-staked multiplier, weight == sqrt(balance).
     assert_eq!(proposal.yes, 2_000_000);
     assert_eq!(proposal.no, 0);
+}
+
+#[ink::test]
+fn vote_weight_applies_time_staked_multiplier() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+
+    // sqrt(4e12) = 2_000_000; 0.8x multiplier → 1_600_000.
+    let balance = 4_000_000_000_000;
+    submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 8_000, 0);
+    let id = gov
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .expect("submit ok");
+
+    gov.vote(id, accounts.bob, true, balance, 8_000, Vec::new())
+        .expect("vote ok");
+
+    assert_eq!(gov.get_proposal(id).unwrap().yes, 1_600_000);
+}
+
+#[ink::test]
+fn vote_rejects_invalid_proof() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+
+    let balance = 4_000_000_000_000;
+    submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 10_000, 0);
+    let id = gov
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .expect("submit ok");
+
+    // A balance that doesn't match the committed leaf can't be proven.
+    let res = gov.vote(id, accounts.bob, true, balance * 2, 10_000, Vec::new());
+    assert_eq!(res, Err(Error::InvalidProof));
+    assert_eq!(gov.get_proposal(id).unwrap().yes, 0);
+}
+
+#[ink::test]
+fn vote_verifies_multi_leaf_proof() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+
+    // Two-leaf tree; the voter (alice/bob) proves membership with the sibling leaf.
+    let balance = 4_000_000_000_000;
+    let leaf_voter = leaf_hash(accounts.alice, accounts.bob, balance, 10_000);
+    let leaf_other = leaf_hash(accounts.charlie, accounts.eve, 1_000_000, 10_000);
+    let root = hash_pair(leaf_voter, leaf_other);
+    gov.submit_snapshot(root, 0, 0).expect("snapshot ok");
+
+    let id = gov
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .expect("submit ok");
+
+    gov.vote(id, accounts.bob, true, balance, 10_000, vec![leaf_other])
+        .expect("vote ok");
+    assert_eq!(gov.get_proposal(id).unwrap().yes, 2_000_000);
 }
 
 #[ink::test]
@@ -362,13 +454,18 @@ fn vote_rejects_double_vote_for_same_pair() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
 
-    register_stake(Some(4_000_000_000_000));
+    let balance = 4_000_000_000_000;
+    submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 10_000, 0);
     let id = gov
         .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
         .expect("submit ok");
 
-    gov.vote(id, accounts.bob, true).expect("vote ok");
-    assert_eq!(gov.vote(id, accounts.bob, false), Err(Error::AlreadyVoted));
+    gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
+        .expect("vote ok");
+    assert_eq!(
+        gov.vote(id, accounts.bob, false, balance, 10_000, Vec::new()),
+        Err(Error::AlreadyVoted)
+    );
 }
 
 #[ink::test]
@@ -440,13 +537,13 @@ fn execute_on_non_passed_fails() {
 fn finalize_rejects_when_quorum_not_met() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
-    // A non-zero circulating supply yields a non-zero quorum (20% of 100 = 20), so a
-    // zero-vote proposal falls short and is rejected on finalize.
     let mut p = GovernanceParams::default_params();
     p.voting_period_ms = 1; // expire quickly
     gov.update_params(p).expect("update ok");
-    gov.set_circulating_supply(100).expect("set supply ok");
-    assert_eq!(gov.quorum(), 20);
+    // A non-zero circulating supply yields a non-zero quorum (20% of 100 = 20), so a
+    // zero-vote proposal falls short and is rejected on finalize.
+    let epoch = gov.submit_snapshot([0u8; 32], 100, 0).expect("snapshot ok");
+    assert_eq!(gov.quorum(epoch), 20);
 
     let id = gov
         .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
@@ -465,19 +562,28 @@ fn finalize_rejects_when_quorum_not_met() {
 fn quorum_is_20_percent_of_circulating_supply_by_default() {
     let mut gov = make_governance();
 
-    gov.set_circulating_supply(1_000_000).expect("set supply ok");
-    assert_eq!(gov.circulating_supply(), 1_000_000);
+    let epoch = gov
+        .submit_snapshot([0u8; 32], 1_000_000, 0)
+        .expect("snapshot ok");
+    assert_eq!(
+        gov.get_snapshot(epoch).unwrap().circulating_supply,
+        1_000_000
+    );
     // 20% of 1_000_000.
-    assert_eq!(gov.quorum(), 200_000);
+    assert_eq!(gov.quorum(epoch), 200_000);
 }
 
 #[ink::test]
-fn set_circulating_supply_rejects_non_admin() {
+fn submit_snapshot_rejects_non_admin() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
+    let epoch_before = gov.current_epoch();
     set_caller(accounts.bob);
-    assert_eq!(gov.set_circulating_supply(1_000_000), Err(Error::NotAdmin));
-    assert_eq!(gov.circulating_supply(), 0);
+    assert_eq!(
+        gov.submit_snapshot([0u8; 32], 1_000_000, 0),
+        Err(Error::NotAdmin)
+    );
+    assert_eq!(gov.current_epoch(), epoch_before);
 }
 
 #[ink::test]
@@ -496,19 +602,66 @@ fn finalize_passes_when_quorum_met() {
     p.voting_period_ms = 1; // expire quickly
     gov.update_params(p).expect("update ok");
 
-    // sqrt(4e12) = 2_000_000 voting power from one vote. Set supply so quorum (20%) is below that.
-    register_stake(Some(4_000_000_000_000));
-    gov.set_circulating_supply(1_000_000).expect("set supply ok"); // quorum = 200_000
-    assert!(gov.quorum() < 2_000_000);
+    // Supply 1e6 → quorum 200_000; the single voter's 4e12 balance clears it comfortably.
+    let balance = 4_000_000_000_000;
+    let epoch = submit_single_leaf_snapshot(
+        &mut gov,
+        accounts.alice,
+        accounts.bob,
+        balance,
+        10_000,
+        1_000_000,
+    );
+    assert!(gov.quorum(epoch) < balance);
 
     let id = gov
         .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
         .unwrap();
-    gov.vote(id, accounts.bob, true).expect("vote ok");
+    gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
+        .expect("vote ok");
 
     ink::env::test::advance_block::<tusdt_env::CustomEnvironment>();
     ink::env::test::advance_block::<tusdt_env::CustomEnvironment>();
 
     gov.finalize(id).expect("finalize ok");
-    assert_eq!(gov.get_proposal(id).unwrap().status, ProposalStatus::Passed);
+    let proposal = gov.get_proposal(id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Passed);
+    // Quorum is tracked in raw balance, not voting power.
+    assert_eq!(proposal.voted_balance, balance);
+}
+
+#[ink::test]
+fn finalize_rejects_when_voted_balance_below_quorum() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    let mut p = GovernanceParams::default_params();
+    p.voting_period_ms = 1; // expire quickly
+    gov.update_params(p).expect("update ok");
+
+    // Voter's balance (1e6) is below the quorum (20% of 1e8 = 2e7), so a unanimous yes still
+    // fails quorum — the threshold is measured in raw balance, not voting power.
+    let balance = 1_000_000;
+    let epoch = submit_single_leaf_snapshot(
+        &mut gov,
+        accounts.alice,
+        accounts.bob,
+        balance,
+        10_000,
+        100_000_000,
+    );
+    assert_eq!(gov.quorum(epoch), 20_000_000);
+
+    let id = gov
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .unwrap();
+    gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
+        .expect("vote ok");
+
+    ink::env::test::advance_block::<tusdt_env::CustomEnvironment>();
+    ink::env::test::advance_block::<tusdt_env::CustomEnvironment>();
+
+    gov.finalize(id).expect("finalize ok");
+    let proposal = gov.get_proposal(id).unwrap();
+    assert_eq!(proposal.status, ProposalStatus::Rejected);
+    assert_eq!(proposal.voted_balance, balance);
 }

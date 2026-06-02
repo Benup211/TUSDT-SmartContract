@@ -1,16 +1,20 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 pub use self::governance::{
-    CirculatingSupplyUpdated, GovernanceParams, Proposal, ProposalExecuted, ProposalFinalized,
-    ProposalKind, ProposalStatus, ProposalSubmitted, TusdtGovernance, TusdtGovernanceRef, Voted,
+    GovernanceParams, Proposal, ProposalExecuted, ProposalFinalized, ProposalKind, ProposalStatus,
+    ProposalSubmitted, Snapshot, SnapshotSubmitted, TusdtGovernance, TusdtGovernanceRef, Voted,
 };
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
 mod governance {
     use ink::prelude::string::String;
+    use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use ink::{env::call::FromAccountId, ToAccountId};
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
+
+    /// A 32-byte Blake2b-256 digest used for Merkle roots, leaves, and proof nodes.
+    pub(crate) type MerkleHash = [u8; 32];
 
     /// Maximum CID byte length accepted by `submit_proposal` (CIDv1 base32 is ~62 chars).
     pub(crate) const MAX_CID_LEN: usize = 96;
@@ -26,12 +30,6 @@ mod governance {
     pub(crate) const DEFAULT_SUBMISSION_CLOSE_DAY: u8 = 25;
     /// Milliseconds in a day; block timestamps are Unix epoch milliseconds.
     pub(crate) const MS_PER_DAY: u64 = 86_400_000;
-    /// Time-staked multiplier applied to voting power, in basis points (10_000 = 1.0x).
-    ///
-    /// TODO: derive this per `(hotkey, coldkey)` from an off-chain stake-age snapshot — 0.5x
-    /// (5_000) for stake held <3 months, 0.8x (8_000) for 3-6 months, 1.0x (10_000) for >6 months.
-    /// Hardcoded to 1.0x until the snapshot feed is wired in.
-    pub(crate) const TIME_STAKED_MULTIPLIER_BPS: u32 = 10_000;
 
     /// Tunable governance parameters. Updatable by admin.
     #[derive(Debug, Copy, Clone)]
@@ -41,7 +39,8 @@ mod governance {
         pub netuid: u16,
         pub voting_period_ms: u64,
         /// Quorum as a fraction of the alpha circulating supply, in basis points (2_000 = 20%).
-        /// The absolute threshold is `circulating_supply * quorum_bps / 10_000`; see [`quorum`].
+        /// A proposal passes only if the raw balance that voted reaches `circulating_supply *
+        /// quorum_bps / 10_000`; see [`quorum`].
         pub quorum_bps: u32,
         pub approval_bps: u32,
         pub min_proposer_stake: u128,
@@ -102,11 +101,31 @@ mod governance {
         pub kind: ProposalKind,
         pub created_at: Timestamp,
         pub voting_ends_at: Timestamp,
+        /// Snapshot epoch this proposal is bound to; votes prove membership against its root.
+        pub snapshot_epoch: u64,
         /// Accumulated voting power in favor (see [`Voted::weight`]).
         pub yes: u128,
         /// Accumulated voting power against.
         pub no: u128,
+        /// Sum of raw (snapshot-frozen) alpha balance that has voted; measured against the quorum.
+        pub voted_balance: u128,
         pub status: ProposalStatus,
+    }
+
+    /// An off-chain governance snapshot committed on-chain. The Merkle tree's leaves are
+    /// `blake2_256(SCALE(coldkey, hotkey, balance, multiplier_bps))`, with internal nodes hashing
+    /// the sorted pair of children. The balance is frozen here, so flash-staking cannot inflate
+    /// voting power, and the time-staked `multiplier_bps` is carried per leaf.
+    #[derive(Debug, Clone)]
+    #[ink::scale_derive(Encode, Decode, TypeInfo)]
+    #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
+    pub struct Snapshot {
+        /// Merkle root over all eligible `(coldkey, hotkey, balance, multiplier_bps)` leaves.
+        pub root: MerkleHash,
+        /// Alpha circulating supply at the snapshot block; the base for the quorum.
+        pub circulating_supply: u128,
+        /// Subnet block height the snapshot was taken at (for off-chain auditing).
+        pub snapshot_block: u32,
     }
 
     /// Governance storage.
@@ -116,9 +135,10 @@ mod governance {
         admin: AccountId,
         treasury: TusdtTreasuryRef,
         params: GovernanceParams,
-        // Alpha circulating supply from the latest off-chain snapshot; base for the quorum.
-        // TODO: populate this as part of the snapshot submission flow (see `set_circulating_supply`).
-        circulating_supply: u128,
+        // Latest committed snapshot epoch; 0 means no snapshot has been submitted yet.
+        current_epoch: u64,
+        // Per-epoch snapshots; proposals bind to one at submission and votes prove against it.
+        snapshots: Mapping<u64, Snapshot>,
         proposal_count: u64,
         proposals: Mapping<u64, Proposal>,
         // Composite key `(proposal_id, coldkey, hotkey) -> ()` blocks double votes on the same pair.
@@ -165,10 +185,14 @@ mod governance {
         proposal_id: u64,
     }
 
-    /// Emitted when the off-chain alpha circulating supply snapshot is updated.
+    /// Emitted when a new off-chain snapshot is committed on-chain.
     #[ink(event)]
-    pub struct CirculatingSupplyUpdated {
+    pub struct SnapshotSubmitted {
+        #[ink(topic)]
+        epoch: u64,
+        root: MerkleHash,
         circulating_supply: u128,
+        snapshot_block: u32,
     }
 
     /// Errors returned by the governance contract.
@@ -185,6 +209,8 @@ mod governance {
         NoStake,
         InsufficientStake,
         OutsideSubmissionWindow,
+        NoSnapshot,
+        InvalidProof,
         StakeQueryFailed,
         InvalidCid,
         InvalidAmount,
@@ -205,7 +231,8 @@ mod governance {
                 admin: Self::env().caller(),
                 treasury,
                 params: GovernanceParams::default_params(),
-                circulating_supply: 0,
+                current_epoch: 0,
+                snapshots: Mapping::default(),
                 proposal_count: 0,
                 proposals: Mapping::default(),
                 has_voted: Mapping::default(),
@@ -230,31 +257,65 @@ mod governance {
             self.params
         }
 
-        /// Returns the alpha circulating supply from the latest snapshot.
+        /// Returns the latest committed snapshot epoch (0 if none submitted yet).
         #[ink(message)]
-        pub fn circulating_supply(&self) -> u128 {
-            self.circulating_supply
+        pub fn current_epoch(&self) -> u64 {
+            self.current_epoch
         }
 
-        /// Sets the alpha circulating supply used to derive the quorum; admin-only.
+        /// Looks up a snapshot by epoch.
+        #[ink(message)]
+        pub fn get_snapshot(&self, epoch: u64) -> Option<Snapshot> {
+            self.snapshots.get(epoch)
+        }
+
+        /// Commits a new off-chain snapshot and returns its epoch; admin-only.
         ///
-        /// TODO: fold this into the off-chain snapshot submission so the supply is updated
-        /// atomically with the snapshot (and ideally verified) rather than set independently.
+        /// `root` is the Merkle root over `(coldkey, hotkey, balance, multiplier_bps)` leaves (see
+        /// [`Snapshot`]); `circulating_supply` is the alpha supply that the quorum is derived from;
+        /// `snapshot_block` records the subnet height for off-chain auditing. Each call advances the
+        /// epoch by one; proposals submitted afterward bind to the new epoch.
         #[ink(message)]
-        pub fn set_circulating_supply(&mut self, circulating_supply: u128) -> Result<()> {
+        pub fn submit_snapshot(
+            &mut self,
+            root: MerkleHash,
+            circulating_supply: u128,
+            snapshot_block: u32,
+        ) -> Result<u64> {
             self.ensure_admin()?;
-            self.circulating_supply = circulating_supply;
-            self.env().emit_event(CirculatingSupplyUpdated { circulating_supply });
-            Ok(())
+            let epoch = self.current_epoch.checked_add(1).ok_or(Error::ArithmeticError)?;
+            self.snapshots.insert(
+                epoch,
+                &Snapshot {
+                    root,
+                    circulating_supply,
+                    snapshot_block,
+                },
+            );
+            self.current_epoch = epoch;
+            self.env().emit_event(SnapshotSubmitted {
+                epoch,
+                root,
+                circulating_supply,
+                snapshot_block,
+            });
+            Ok(epoch)
         }
 
-        /// Returns the absolute quorum threshold: `circulating_supply * quorum_bps / 10_000`.
-        /// A proposal must gather at least this much total voting power to be eligible to pass.
+        /// Returns the absolute quorum threshold for `epoch`: `circulating_supply * quorum_bps /
+        /// 10_000`. A proposal must gather at least this much raw voted balance (see
+        /// [`Proposal::voted_balance`]) to be eligible to pass. Returns 0 if the epoch has no
+        /// snapshot.
         #[ink(message)]
-        pub fn quorum(&self) -> u128 {
-            self.circulating_supply
-                .saturating_mul(self.params.quorum_bps as u128)
-                / BPS_DENOMINATOR as u128
+        pub fn quorum(&self, epoch: u64) -> u128 {
+            self.snapshots
+                .get(epoch)
+                .map(|s| {
+                    s.circulating_supply
+                        .saturating_mul(self.params.quorum_bps as u128)
+                        / BPS_DENOMINATOR as u128
+                })
+                .unwrap_or(0)
         }
 
         /// Returns the total number of proposals submitted.
@@ -325,6 +386,13 @@ mod governance {
                 return Err(Error::OutsideSubmissionWindow);
             }
 
+            // Bind the proposal to the current snapshot so in-flight votes prove against a fixed
+            // root even if a newer snapshot lands during the voting period.
+            let snapshot_epoch = self.current_epoch;
+            if snapshot_epoch == 0 {
+                return Err(Error::NoSnapshot);
+            }
+
             let proposer = self.env().caller();
 
             // Gate submission on the proposer's subnet alpha stake.
@@ -348,8 +416,10 @@ mod governance {
                 kind,
                 created_at: now,
                 voting_ends_at,
+                snapshot_epoch,
                 yes: 0,
                 no: 0,
+                voted_balance: 0,
                 status: ProposalStatus::Active,
             };
             self.proposals.insert(id, &proposal);
@@ -364,10 +434,21 @@ mod governance {
             Ok(id)
         }
 
-        /// Casts a vote on `proposal_id`. The caller is treated as the coldkey; `hotkey` is provided
-        /// explicitly and the pair's voting power (see [`voting_power`]) is the weight.
+        /// Casts a vote on `proposal_id`. The caller is the coldkey; `hotkey`, `balance`, and
+        /// `multiplier_bps` are the caller's leaf in the proposal's snapshot, proven by `proof`.
+        ///
+        /// Voting power is `sqrt(balance) * multiplier_bps / 10_000`, where `balance` is the
+        /// snapshot-frozen SN113 alpha and `multiplier_bps` is the time-staked multiplier.
         #[ink(message)]
-        pub fn vote(&mut self, proposal_id: u64, hotkey: AccountId, support: bool) -> Result<()> {
+        pub fn vote(
+            &mut self,
+            proposal_id: u64,
+            hotkey: AccountId,
+            support: bool,
+            balance: u128,
+            multiplier_bps: u32,
+            proof: Vec<MerkleHash>,
+        ) -> Result<()> {
             let mut proposal = self
                 .proposals
                 .get(proposal_id)
@@ -386,7 +467,17 @@ mod governance {
                 return Err(Error::AlreadyVoted);
             }
 
-            let weight = self.voting_power(hotkey, coldkey)?;
+            // Verify the caller's leaf against the snapshot the proposal is bound to.
+            let snapshot = self
+                .snapshots
+                .get(proposal.snapshot_epoch)
+                .ok_or(Error::NoSnapshot)?;
+            let leaf = leaf_hash(coldkey, hotkey, balance, multiplier_bps);
+            if !verify_merkle_proof(&proof, snapshot.root, leaf) {
+                return Err(Error::InvalidProof);
+            }
+
+            let weight = voting_power(balance, multiplier_bps)?;
             if weight == 0 {
                 return Err(Error::NoStake);
             }
@@ -402,6 +493,11 @@ mod governance {
                     .checked_add(weight)
                     .ok_or(Error::ArithmeticError)?;
             }
+            // Track raw balance participation for the quorum (in circulating-supply units).
+            proposal.voted_balance = proposal
+                .voted_balance
+                .checked_add(balance)
+                .ok_or(Error::ArithmeticError)?;
             self.proposals.insert(proposal_id, &proposal);
             self.has_voted.insert(key, &());
 
@@ -430,11 +526,14 @@ mod governance {
                 return Err(Error::VotingStillOpen);
             }
 
+            // Quorum is measured by raw balance that voted (same units as circulating supply);
+            // the approval ratio is weighted by voting power (yes / (yes + no)).
             let total = proposal
                 .yes
                 .checked_add(proposal.no)
                 .ok_or(Error::ArithmeticError)?;
-            let new_status = if total < self.quorum() {
+            let quorum_met = proposal.voted_balance >= self.quorum(proposal.snapshot_epoch);
+            let new_status = if !quorum_met || total == 0 {
                 ProposalStatus::Rejected
             } else {
                 let yes_bps = proposal
@@ -495,21 +594,6 @@ mod governance {
             Ok(())
         }
 
-        /// Computes the voting power of a `(hotkey, coldkey)` pair:
-        ///
-        /// `voting_power = sqrt(SN113 alpha balance) * time_staked_multiplier`
-        ///
-        /// The square root dampens large stakes; the time-staked multiplier (currently a fixed
-        /// 1.0x, see [`TIME_STAKED_MULTIPLIER_BPS`]) rewards longer-held stake.
-        fn voting_power(&self, hotkey: AccountId, coldkey: AccountId) -> Result<u128> {
-            let stake = self.read_stake_weight(hotkey, coldkey)?;
-            let root = integer_sqrt(stake);
-            // TODO: replace the fixed 1.0x with the off-chain time-staked multiplier for this pair.
-            root.checked_mul(TIME_STAKED_MULTIPLIER_BPS as u128)
-                .map(|scaled| scaled / BPS_DENOMINATOR as u128)
-                .ok_or(Error::ArithmeticError)
-        }
-
         /// Calls the chain extension to fetch the (hotkey, coldkey, netuid) raw alpha stake.
         fn read_stake_weight(&self, hotkey: AccountId, coldkey: AccountId) -> Result<u128> {
             let info = self
@@ -559,6 +643,53 @@ mod governance {
             y = (x + n / x) / 2;
         }
         x
+    }
+
+    /// Voting power for a snapshot leaf: `sqrt(balance) * multiplier_bps / 10_000`.
+    /// The square root dampens large stakes; the time-staked `multiplier_bps` rewards longer-held
+    /// stake (0.5x = 5_000, 0.8x = 8_000, 1.0x = 10_000).
+    pub(crate) fn voting_power(balance: u128, multiplier_bps: u32) -> Result<u128> {
+        integer_sqrt(balance)
+            .checked_mul(multiplier_bps as u128)
+            .map(|scaled| scaled / BPS_DENOMINATOR as u128)
+            .ok_or(Error::ArithmeticError)
+    }
+
+    /// Computes a snapshot leaf hash: `blake2_256(SCALE(coldkey, hotkey, balance, multiplier_bps))`.
+    /// Off-chain proof generation must encode and hash the tuple identically.
+    pub(crate) fn leaf_hash(
+        coldkey: AccountId,
+        hotkey: AccountId,
+        balance: u128,
+        multiplier_bps: u32,
+    ) -> MerkleHash {
+        let mut out = MerkleHash::default();
+        ink::env::hash_encoded::<ink::env::hash::Blake2x256, _>(
+            &(coldkey, hotkey, balance, multiplier_bps),
+            &mut out,
+        );
+        out
+    }
+
+    /// Hashes a pair of sibling nodes in sorted order: `blake2_256(min(a,b) ++ max(a,b))`.
+    /// Sorting lets proofs omit per-node position flags (OpenZeppelin convention).
+    pub(crate) fn hash_pair(a: MerkleHash, b: MerkleHash) -> MerkleHash {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        let mut input = [0u8; 64];
+        input[..32].copy_from_slice(&lo);
+        input[32..].copy_from_slice(&hi);
+        let mut out = MerkleHash::default();
+        ink::env::hash_bytes::<ink::env::hash::Blake2x256>(&input, &mut out);
+        out
+    }
+
+    /// Verifies that `leaf` is part of the tree with the given `root`, folding `proof` bottom-up.
+    pub(crate) fn verify_merkle_proof(proof: &[MerkleHash], root: MerkleHash, leaf: MerkleHash) -> bool {
+        let mut computed = leaf;
+        for sibling in proof {
+            computed = hash_pair(computed, *sibling);
+        }
+        computed == root
     }
 }
 
