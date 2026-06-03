@@ -66,6 +66,7 @@ mod governance {
 
     /// Funding proposals release `amount` of `token_kind` from `fund` to `recipient` on execution.
     /// NonFunding proposals are signal-only.
+    #[allow(clippy::cast_possible_truncation)]
     #[derive(Debug, Clone)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -283,7 +284,10 @@ mod governance {
             snapshot_block: u32,
         ) -> Result<u64> {
             self.ensure_admin()?;
-            let epoch = self.current_epoch.checked_add(1).ok_or(Error::ArithmeticError)?;
+            let epoch = self
+                .current_epoch
+                .checked_add(1)
+                .ok_or(Error::ArithmeticError)?;
             self.snapshots.insert(
                 epoch,
                 &Snapshot {
@@ -310,10 +314,10 @@ mod governance {
         pub fn quorum(&self, epoch: u64) -> u128 {
             self.snapshots
                 .get(epoch)
-                .map(|s| {
+                .and_then(|s| {
                     s.circulating_supply
-                        .saturating_mul(self.params.quorum_bps as u128)
-                        / BPS_DENOMINATOR as u128
+                        .saturating_mul(u128::from(self.params.quorum_bps))
+                        .checked_div(u128::from(BPS_DENOMINATOR))
                 })
                 .unwrap_or(0)
         }
@@ -538,10 +542,10 @@ mod governance {
             } else {
                 let yes_bps = proposal
                     .yes
-                    .checked_mul(BPS_DENOMINATOR as u128)
-                    .ok_or(Error::ArithmeticError)?
-                    / total;
-                if yes_bps >= self.params.approval_bps as u128 {
+                    .checked_mul(u128::from(BPS_DENOMINATOR))
+                    .and_then(|x| x.checked_div(total))
+                    .ok_or(Error::ArithmeticError)?;
+                if yes_bps >= u128::from(self.params.approval_bps) {
                     ProposalStatus::Passed
                 } else {
                     ProposalStatus::Rejected
@@ -616,28 +620,39 @@ mod governance {
     /// Returns the UTC day-of-month (1..=31) for a Unix-epoch timestamp in milliseconds.
     ///
     /// Uses Howard Hinnant's `civil_from_days` algorithm. Timestamps are always post-1970, so the
-    /// day count is non-negative and the negative-era branch of the general algorithm is omitted.
+    /// day count is non-negative and the negative-era branch of the general algorithm is omitted —
+    /// all arithmetic stays in u64. The constants and ranges are well-known and bounded
+    /// (e.g. `doy <= 365`, `mp <= 11`, `day <= 31`), so `as u8` is safe.
+    //
+    // The Hinnant algorithm relies on standard `+`/`-`/`*`/`/` and is provably non-overflowing for
+    // any u64 millisecond timestamp; rewriting it with `checked_*` everywhere would obscure the
+    // structure without adding safety.
+    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
     pub(crate) fn day_of_month(timestamp_ms: u64) -> u8 {
         // Days since the 1970-01-01 epoch.
-        let days = (timestamp_ms / MS_PER_DAY) as i64;
+        let days: u64 = timestamp_ms / MS_PER_DAY;
         // Shift the era origin to 0000-03-01 so leap days fall at the end of the 400-year cycle.
-        let z = days + 719_468;
-        let era = z / 146_097;
-        let doe = z - era * 146_097; // day-of-era, [0, 146096]
-        let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // year-of-era, [0, 399]
-        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day-of-year (Mar-based), [0, 365]
-        let mp = (5 * doy + 2) / 153; // month, Mar=0..Feb=11
-        let day = doy - (153 * mp + 2) / 5 + 1; // day-of-month, [1, 31]
+        let z: u64 = days + 719_468;
+        let era: u64 = z / 146_097;
+        let doe: u64 = z - era * 146_097; // day-of-era, [0, 146096]
+        let yoe: u64 = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // year-of-era, [0, 399]
+        let doy: u64 = doe - (365 * yoe + yoe / 4 - yoe / 100); // day-of-year (Mar-based), [0, 365]
+        let mp: u64 = (5 * doy + 2) / 153; // month, Mar=0..Feb=11
+        let day: u64 = doy - (153 * mp + 2) / 5 + 1; // day-of-month, [1, 31]
         day as u8
     }
 
     /// Integer (floor) square root of `n`, via Newton's method. No floats are available on-chain.
+    //
+    // Newton's iteration is monotonically decreasing and bounded; no operation can overflow for
+    // any u128 input. Annotating with checked_* every step would mask the standard form.
+    #[allow(clippy::arithmetic_side_effects)]
     pub(crate) fn integer_sqrt(n: u128) -> u128 {
         if n < 2 {
             return n;
         }
         let mut x = n;
-        let mut y = (x + 1) / 2;
+        let mut y = x.div_ceil(2);
         while y < x {
             x = y;
             y = (x + n / x) / 2;
@@ -650,8 +665,8 @@ mod governance {
     /// stake (0.5x = 5_000, 0.8x = 8_000, 1.0x = 10_000).
     pub(crate) fn voting_power(balance: u128, multiplier_bps: u32) -> Result<u128> {
         integer_sqrt(balance)
-            .checked_mul(multiplier_bps as u128)
-            .map(|scaled| scaled / BPS_DENOMINATOR as u128)
+            .checked_mul(u128::from(multiplier_bps))
+            .and_then(|scaled| scaled.checked_div(u128::from(BPS_DENOMINATOR)))
             .ok_or(Error::ArithmeticError)
     }
 
@@ -684,7 +699,11 @@ mod governance {
     }
 
     /// Verifies that `leaf` is part of the tree with the given `root`, folding `proof` bottom-up.
-    pub(crate) fn verify_merkle_proof(proof: &[MerkleHash], root: MerkleHash, leaf: MerkleHash) -> bool {
+    pub(crate) fn verify_merkle_proof(
+        proof: &[MerkleHash],
+        root: MerkleHash,
+        leaf: MerkleHash,
+    ) -> bool {
         let mut computed = leaf;
         for sibling in proof {
             computed = hash_pair(computed, *sibling);

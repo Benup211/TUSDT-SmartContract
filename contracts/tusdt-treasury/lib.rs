@@ -291,15 +291,17 @@ mod treasury {
     /// Pure split of `delta` into `[Emergency, Operation, Insurance, Dividend, Buyback, Voting]` shares.
     ///
     /// Each share is `delta * bps / 10_000`; any integer-division remainder is credited to Emergency
-    /// so the six shares sum exactly to `delta`.
+    /// so the six shares sum exactly to `delta`. Each share is bounded above by `delta` (a `Balance`),
+    /// so the `u128 -> Balance` downcasts via `try_from` cannot fail; we still go through `try_from`
+    /// to keep clippy quiet about cast truncation.
     pub(crate) fn split_delta(delta: Balance) -> Option<[Balance; 6]> {
-        let total_bps = TOTAL_BPS as u128;
-        let d = delta as u128;
-        let op = (d.checked_mul(OPERATION_BPS as u128)?) / total_bps;
-        let ins = (d.checked_mul(INSURANCE_BPS as u128)?) / total_bps;
-        let div = (d.checked_mul(DIVIDEND_BPS as u128)?) / total_bps;
-        let buy = (d.checked_mul(BUYBACK_BPS as u128)?) / total_bps;
-        let vot = (d.checked_mul(VOTING_BPS as u128)?) / total_bps;
+        let total_bps = u128::from(TOTAL_BPS);
+        let d = u128::from(delta);
+        let op = d.checked_mul(u128::from(OPERATION_BPS))?.checked_div(total_bps)?;
+        let ins = d.checked_mul(u128::from(INSURANCE_BPS))?.checked_div(total_bps)?;
+        let div = d.checked_mul(u128::from(DIVIDEND_BPS))?.checked_div(total_bps)?;
+        let buy = d.checked_mul(u128::from(BUYBACK_BPS))?.checked_div(total_bps)?;
+        let vot = d.checked_mul(u128::from(VOTING_BPS))?.checked_div(total_bps)?;
         let assigned = op
             .checked_add(ins)?
             .checked_add(div)?
@@ -307,12 +309,12 @@ mod treasury {
             .checked_add(vot)?;
         let emergency = d.checked_sub(assigned)?;
         Some([
-            emergency as Balance,
-            op as Balance,
-            ins as Balance,
-            div as Balance,
-            buy as Balance,
-            vot as Balance,
+            Balance::try_from(emergency).ok()?,
+            Balance::try_from(op).ok()?,
+            Balance::try_from(ins).ok()?,
+            Balance::try_from(div).ok()?,
+            Balance::try_from(buy).ok()?,
+            Balance::try_from(vot).ok()?,
         ])
     }
 }

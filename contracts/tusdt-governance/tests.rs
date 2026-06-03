@@ -1,3 +1,13 @@
+// Tests use ergonomic plain arithmetic on bounded constants; the strict numeric lints aren't
+// useful here and would just clutter assertions.
+#![allow(
+    clippy::arithmetic_side_effects,
+    clippy::cast_possible_truncation,
+    clippy::cast_possible_wrap,
+    clippy::cast_sign_loss,
+    clippy::redundant_pattern_matching
+)]
+
 use super::governance::*;
 use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
