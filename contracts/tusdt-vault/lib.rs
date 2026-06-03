@@ -92,6 +92,7 @@ mod vault {
     #[ink(storage)]
     pub struct TusdtVault {
         governance: AccountId,
+        treasury: AccountId,
         platform: AccountId,
         paused: bool,
 
@@ -143,7 +144,7 @@ mod vault {
         amount: Balance,
     }
 
-    /// Emitted when tUSDT is borrowed against a vault; `amount` is gross, fee is the platform cut.
+    /// Emitted when tUSDT is borrowed against a vault; `amount` is gross, fee is the treasury cut.
     #[ink(event)]
     pub struct TokensBorrowed {
         #[ink(topic)]
@@ -205,7 +206,16 @@ mod vault {
         new_governance: AccountId,
     }
 
-    /// Emitted when the platform fee recipient account is updated.
+    /// Emitted when the treasury (fee recipient) account is updated.
+    #[ink(event)]
+    pub struct VaultTreasuryUpdated {
+        #[ink(topic)]
+        previous_treasury: AccountId,
+        #[ink(topic)]
+        new_treasury: AccountId,
+    }
+
+    /// Emitted when the platform account is updated.
     #[ink(event)]
     pub struct VaultPlatformUpdated {
         #[ink(topic)]
@@ -325,9 +335,18 @@ mod vault {
     }
 
     impl TusdtVault {
-        /// Initializes the vault contract by instantiating the token and auction contracts with the provided code hashes.
+        /// Initializes the vault by wiring up the treasury fee recipient and instantiating the
+        /// token, auction, and oracle child contracts.
+        ///
+        /// `treasury` must be a deployed treasury contract address; governance can
+        /// later reassign it via `update_treasury`.
         #[ink(constructor)]
-        pub fn new(token_code_hash: Hash, auction_code_hash: Hash, oracle_code_hash: Hash) -> Self {
+        pub fn new(
+            treasury: AccountId,
+            token_code_hash: Hash,
+            auction_code_hash: Hash,
+            oracle_code_hash: Hash,
+        ) -> Self {
             let governance = Self::env().caller();
 
             let contract_account = Self::env().account_id();
@@ -351,6 +370,7 @@ mod vault {
 
             Self {
                 governance,
+                treasury,
                 platform: governance,
                 paused: false,
                 token,
@@ -447,7 +467,23 @@ mod vault {
             Ok(())
         }
 
-        /// Updates the platform fee recipient account; governance-only.
+        /// Updates the treasury (fee recipient) account; governance-only.
+        #[ink(message)]
+        pub fn update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
+            self.ensure_governance()?;
+
+            let previous_treasury = self.treasury;
+            self.treasury = new_treasury;
+
+            self.env().emit_event(VaultTreasuryUpdated {
+                previous_treasury,
+                new_treasury,
+            });
+
+            Ok(())
+        }
+
+        /// Updates the platform (pause-capable operator) account; governance-only.
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -485,17 +521,18 @@ mod vault {
             Ok(())
         }
 
-        /// Transfers surplus TUSDT held by the vault contract to governance.
+        /// Transfers surplus TUSDT held by the vault contract to the treasury.
+        ///
+        /// Permissionless — anyone may sweep accumulated surplus into the treasury, where it will
+        /// be booked across the funds on the next `distribute()` call.
         #[ink(message)]
         pub fn claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
-            self.ensure_governance()?;
-
             self.token
-                .transfer(self.governance(), amount)
+                .transfer(self.treasury, amount)
                 .map_err(|_| Error::TransferFailed)?;
 
             self.env().emit_event(SurplusTusdtClaimed {
-                recipient: self.governance(),
+                recipient: self.treasury,
                 amount,
             });
 
@@ -566,7 +603,7 @@ mod vault {
         }
 
         /// Borrows tokens against the vault's collateral, validating collateral ratio,
-        /// accruing interest, minting the fee portion to the platform, and sending
+        /// accruing interest, minting the fee portion to the treasury, and sending
         /// the net borrowed tokens to the caller.
         #[ink(message)]
         pub fn borrow_token(&mut self, vault_id: u32, amount: Balance) -> Result<()> {
@@ -614,7 +651,7 @@ mod vault {
             }
             if fee > 0 {
                 self.token
-                    .mint(self.platform, fee)
+                    .mint(self.treasury, fee)
                     .map_err(|_| Error::TransferFailed)?;
             }
 
@@ -634,7 +671,7 @@ mod vault {
         }
 
         /// Repays borrowed tokens from a vault, charging the transaction fee in TUSDT,
-        /// routing accrued interest and the fee to the platform, and burning only principal net supply.
+        /// routing accrued interest and the fee to the treasury, and burning only principal net supply.
         #[ink(message)]
         pub fn repay_token(&mut self, vault_id: u32, amount: Balance) -> Result<()> {
             self.ensure_not_paused()?;
@@ -658,13 +695,13 @@ mod vault {
             self.token
                 .burn(caller, total_token_charge)
                 .map_err(|_| Error::TransferFailed)?;
-            let platform_mint = payment
+            let treasury_mint = payment
                 .interest_payment
                 .checked_add(fee)
                 .ok_or(Error::ArithmeticError)?;
-            if platform_mint > 0 {
+            if treasury_mint > 0 {
                 self.token
-                    .mint(self.platform, platform_mint)
+                    .mint(self.treasury, treasury_mint)
                     .map_err(|_| Error::TransferFailed)?;
             }
 
@@ -800,7 +837,7 @@ mod vault {
         }
 
         /// Settles a finalized liquidation auction, transferring collateral to the winner,
-        /// routing accrued interest to the platform, and burning only principal.
+        /// routing accrued interest to the treasury, and burning only principal.
         ///
         /// This remains callable while paused so governance can freeze new mutations without
         /// trapping already-finalized auction proceeds in the auction contract.
@@ -844,7 +881,7 @@ mod vault {
                 .ok_or(Error::ArithmeticError)?;
 
             if transaction_fee > 0 {
-                self.transfer_transaction_fee_to_platform(transaction_fee)?;
+                self.transfer_transaction_fee_to_treasury(transaction_fee)?;
             }
             if winner_collateral > 0 && self.env().transfer(winner, winner_collateral).is_err() {
                 return Err(Error::TransferFailed);
@@ -854,7 +891,7 @@ mod vault {
                 .map_err(|_| Error::TransferFailed)?;
             if payment.interest_payment > 0 {
                 self.token
-                    .transfer(self.platform, payment.interest_payment)
+                    .transfer(self.treasury, payment.interest_payment)
                     .map_err(|_| Error::TransferFailed)?;
             }
 
@@ -914,7 +951,13 @@ mod vault {
             self.governance
         }
 
-        /// Returns the current platform account.
+        /// Returns the current treasury (fee recipient) account.
+        #[ink(message)]
+        pub fn treasury(&self) -> AccountId {
+            self.treasury
+        }
+
+        /// Returns the current platform (pause-capable operator) account.
         #[ink(message)]
         pub fn platform(&self) -> AccountId {
             self.platform
@@ -1153,13 +1196,13 @@ mod vault {
             Ok(())
         }
 
-        /// Sends the given native fee amount to the platform account; no-op if `fee == 0`.
+        /// Sends the given native fee amount to the treasury account; no-op if `fee == 0`.
         #[inline]
-        pub(crate) fn transfer_transaction_fee_to_platform(&mut self, fee: Balance) -> Result<()> {
+        pub(crate) fn transfer_transaction_fee_to_treasury(&mut self, fee: Balance) -> Result<()> {
             if fee == 0 {
                 return Ok(());
             }
-            if self.env().transfer(self.platform, fee).is_err() {
+            if self.env().transfer(self.treasury, fee).is_err() {
                 return Err(Error::TransferFailed);
             }
             Ok(())
@@ -1221,6 +1264,7 @@ mod vault {
 
             Self {
                 governance,
+                treasury: governance,
                 platform: governance,
                 paused: false,
                 token: TusdtErc20Ref::from_account_id(accounts.charlie),
