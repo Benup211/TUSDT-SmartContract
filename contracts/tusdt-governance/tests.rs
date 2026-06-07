@@ -81,7 +81,19 @@ fn make_governance_no_snapshot() -> TusdtGovernance {
     register_stake(Some(STAKE_ABOVE_FLOOR));
     // Default the clock inside the submission window; individual tests can override.
     set_block_timestamp(IN_WINDOW_TS);
-    TusdtGovernance::new(accounts.django)
+    // Maintainer is alice (the caller); the treasury address is a stand-in account.
+    let mut gov = TusdtGovernance::new(accounts.django, accounts.alice);
+    // Seat a full council including alice so operational duties (submit_snapshot) work under the
+    // default caller. frank is intentionally left out as a non-council account for negative tests.
+    gov.set_council(ink::prelude::vec![
+        accounts.alice,
+        accounts.bob,
+        accounts.charlie,
+        accounts.django,
+        accounts.eve,
+    ])
+    .expect("set council");
+    gov
 }
 
 /// Constructs governance and commits an initial empty snapshot (epoch 1, zero root, zero supply)
@@ -109,10 +121,14 @@ fn submit_single_leaf_snapshot(
 }
 
 #[ink::test]
-fn constructor_sets_admin_and_defaults() {
+fn constructor_sets_maintainer_and_defaults() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let gov = make_governance_no_snapshot();
-    assert_eq!(gov.admin(), accounts.alice);
+    assert_eq!(gov.maintainer(), accounts.alice);
+    // The helper seats a full council; alice is a member and frank is not.
+    assert_eq!(gov.council().len(), 5);
+    assert!(gov.is_council(accounts.alice));
+    assert!(!gov.is_council(accounts.frank));
     assert_eq!(gov.proposal_count(), 0);
     let p = gov.params();
     assert_eq!(p.netuid, 113);
@@ -479,12 +495,15 @@ fn vote_rejects_double_vote_for_same_pair() {
 }
 
 #[ink::test]
-fn update_params_rejects_non_admin() {
+fn update_params_rejects_non_maintainer() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
+    // A council member is still not the maintainer and cannot update params.
     set_caller(accounts.bob);
-    let res = gov.update_params(GovernanceParams::default_params());
-    assert!(matches!(res, Err(_)));
+    assert_eq!(
+        gov.update_params(GovernanceParams::default_params()),
+        Err(Error::NotMaintainer)
+    );
 }
 
 #[ink::test]
@@ -584,14 +603,15 @@ fn quorum_is_20_percent_of_circulating_supply_by_default() {
 }
 
 #[ink::test]
-fn submit_snapshot_rejects_non_admin() {
+fn submit_snapshot_rejects_non_council() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
     let epoch_before = gov.current_epoch();
-    set_caller(accounts.bob);
+    // frank is not on the council and cannot commit a snapshot.
+    set_caller(accounts.frank);
     assert_eq!(
         gov.submit_snapshot([0u8; 32], 1_000_000, 0),
-        Err(Error::NotAdmin)
+        Err(Error::NotCouncil)
     );
     assert_eq!(gov.current_epoch(), epoch_before);
 }
@@ -674,4 +694,96 @@ fn finalize_rejects_when_voted_balance_below_quorum() {
     let proposal = gov.get_proposal(id).unwrap();
     assert_eq!(proposal.status, ProposalStatus::Rejected);
     assert_eq!(proposal.voted_balance, balance);
+}
+
+#[ink::test]
+fn set_maintainer_transfers_role() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    gov.set_maintainer(accounts.bob).expect("transfer ok");
+    assert_eq!(gov.maintainer(), accounts.bob);
+
+    // The old maintainer (alice) can no longer govern; the new one can.
+    set_caller(accounts.alice);
+    assert_eq!(
+        gov.update_params(GovernanceParams::default_params()),
+        Err(Error::NotMaintainer)
+    );
+    set_caller(accounts.bob);
+    gov.update_params(GovernanceParams::default_params())
+        .expect("update ok");
+}
+
+#[ink::test]
+fn set_maintainer_rejects_non_maintainer() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    set_caller(accounts.bob);
+    assert_eq!(
+        gov.set_maintainer(accounts.bob),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(gov.maintainer(), accounts.alice);
+}
+
+#[ink::test]
+fn set_council_replaces_membership() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    gov.set_council(ink::prelude::vec![
+        accounts.bob,
+        accounts.charlie,
+        accounts.django,
+        accounts.eve,
+        accounts.frank,
+    ])
+    .expect("set council ok");
+    // alice was dropped; frank was added.
+    assert!(!gov.is_council(accounts.alice));
+    assert!(gov.is_council(accounts.frank));
+    assert_eq!(gov.council().len(), 5);
+}
+
+#[ink::test]
+fn set_council_rejects_non_maintainer() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    // A sitting council member cannot reseat the council; only the maintainer can.
+    set_caller(accounts.bob);
+    assert_eq!(
+        gov.set_council(ink::prelude::vec![
+            accounts.bob,
+            accounts.charlie,
+            accounts.django,
+            accounts.eve,
+            accounts.frank,
+        ]),
+        Err(Error::NotMaintainer)
+    );
+}
+
+#[ink::test]
+fn set_council_rejects_wrong_size() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    assert_eq!(
+        gov.set_council(ink::prelude::vec![accounts.bob, accounts.charlie]),
+        Err(Error::InvalidCouncil)
+    );
+}
+
+#[ink::test]
+fn set_council_rejects_duplicates() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    assert_eq!(
+        gov.set_council(ink::prelude::vec![
+            accounts.bob,
+            accounts.bob,
+            accounts.charlie,
+            accounts.django,
+            accounts.eve,
+        ]),
+        Err(Error::InvalidCouncil)
+    );
 }

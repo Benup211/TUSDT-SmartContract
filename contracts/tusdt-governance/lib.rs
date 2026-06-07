@@ -1,8 +1,9 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 pub use self::governance::{
-    GovernanceParams, Proposal, ProposalExecuted, ProposalFinalized, ProposalKind, ProposalStatus,
-    ProposalSubmitted, Snapshot, SnapshotSubmitted, TusdtGovernance, TusdtGovernanceRef, Voted,
+    CouncilSet, GovernanceParams, MaintainerChanged, Proposal, ProposalExecuted,
+    ProposalFinalized, ProposalKind, ProposalStatus, ProposalSubmitted, Snapshot,
+    SnapshotSubmitted, TusdtGovernance, TusdtGovernanceRef, Voted,
 };
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
@@ -18,6 +19,9 @@ mod governance {
 
     /// Maximum CID byte length accepted by `submit_proposal` (CIDv1 base32 is ~62 chars).
     pub(crate) const MAX_CID_LEN: usize = 96;
+    /// The council is a fixed-size committee; [`TusdtGovernance::set_council`] requires exactly
+    /// this many distinct members.
+    pub(crate) const COUNCIL_SIZE: usize = 5;
     pub(crate) const BPS_DENOMINATOR: u32 = 10_000;
     pub(crate) const DEFAULT_NETUID: u16 = 113;
     pub(crate) const DEFAULT_VOTING_PERIOD_MS: u64 = 48 * 60 * 60 * 1_000;
@@ -31,7 +35,7 @@ mod governance {
     /// Milliseconds in a day; block timestamps are Unix epoch milliseconds.
     pub(crate) const MS_PER_DAY: u64 = 86_400_000;
 
-    /// Tunable governance parameters. Updatable by admin.
+    /// Tunable governance parameters. Updatable by the maintainer.
     #[derive(Debug, Copy, Clone)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -132,8 +136,14 @@ mod governance {
     /// Governance storage.
     #[ink(storage)]
     pub struct TusdtGovernance {
-        // TODO: replace single-admin role with a maintainer and councils.
-        admin: AccountId,
+        /// Top authority: governs parameters and council membership, and can transfer its own
+        /// role. Passed in at construction; an election contract is expected to hold this role
+        /// once it lands.
+        maintainer: AccountId,
+        /// The operating committee, set by the maintainer via [`TusdtGovernance::set_council`].
+        /// Holds exactly [`COUNCIL_SIZE`] members once seated (empty until the first call); council
+        /// members perform operational duties such as committing snapshots.
+        council: Vec<AccountId>,
         treasury: TusdtTreasuryRef,
         params: GovernanceParams,
         // Latest committed snapshot epoch; 0 means no snapshot has been submitted yet.
@@ -186,6 +196,21 @@ mod governance {
         proposal_id: u64,
     }
 
+    /// Emitted when the maintainer role is transferred.
+    #[ink(event)]
+    pub struct MaintainerChanged {
+        #[ink(topic)]
+        previous: AccountId,
+        #[ink(topic)]
+        new: AccountId,
+    }
+
+    /// Emitted when the maintainer (re)sets the council membership.
+    #[ink(event)]
+    pub struct CouncilSet {
+        members: Vec<AccountId>,
+    }
+
     /// Emitted when a new off-chain snapshot is committed on-chain.
     #[ink(event)]
     pub struct SnapshotSubmitted {
@@ -200,7 +225,9 @@ mod governance {
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
-        NotAdmin,
+        NotMaintainer,
+        NotCouncil,
+        InvalidCouncil,
         ProposalNotFound,
         ProposalNotActive,
         VotingClosed,
@@ -224,12 +251,16 @@ mod governance {
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtGovernance {
-        /// Initializes governance with an admin (deployer), a treasury reference, and default params.
+        /// Initializes governance with an explicit `maintainer`, a treasury reference, and default
+        /// params. The maintainer is passed in (typically the subnet owner) rather than defaulting
+        /// to the deployer; an election contract is expected to take over this role later. The
+        /// council starts empty and must be seated by the maintainer via [`set_council`].
         #[ink(constructor)]
-        pub fn new(treasury_address: AccountId) -> Self {
+        pub fn new(treasury_address: AccountId, maintainer: AccountId) -> Self {
             let treasury = TusdtTreasuryRef::from_account_id(treasury_address);
             Self {
-                admin: Self::env().caller(),
+                maintainer,
+                council: Vec::new(),
                 treasury,
                 params: GovernanceParams::default_params(),
                 current_epoch: 0,
@@ -240,16 +271,62 @@ mod governance {
             }
         }
 
-        /// Returns the admin account.
+        /// Returns the maintainer account.
         #[ink(message)]
-        pub fn admin(&self) -> AccountId {
-            self.admin
+        pub fn maintainer(&self) -> AccountId {
+            self.maintainer
+        }
+
+        /// Returns the current council members (empty until the maintainer seats them).
+        #[ink(message)]
+        pub fn council(&self) -> Vec<AccountId> {
+            self.council.clone()
+        }
+
+        /// Reports whether `who` is currently a council member.
+        #[ink(message)]
+        pub fn is_council(&self, who: AccountId) -> bool {
+            self.council.contains(&who)
         }
 
         /// Returns the treasury contract address.
         #[ink(message)]
         pub fn treasury(&self) -> AccountId {
             self.treasury.to_account_id()
+        }
+
+        /// Transfers the maintainer role to `new_maintainer`; maintainer-only. This is the seam the
+        /// future election contract will drive: granting it this role hands maintainer authority to
+        /// election outcomes.
+        #[ink(message)]
+        pub fn set_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
+            self.ensure_maintainer()?;
+            let previous = self.maintainer;
+            self.maintainer = new_maintainer;
+            self.env().emit_event(MaintainerChanged {
+                previous,
+                new: new_maintainer,
+            });
+            Ok(())
+        }
+
+        /// Replaces the entire council with `members`; maintainer-only. Requires exactly
+        /// [`COUNCIL_SIZE`] distinct members, otherwise returns [`Error::InvalidCouncil`].
+        #[ink(message)]
+        pub fn set_council(&mut self, members: Vec<AccountId>) -> Result<()> {
+            self.ensure_maintainer()?;
+            if members.len() != COUNCIL_SIZE {
+                return Err(Error::InvalidCouncil);
+            }
+            // Reject duplicates so the committee really has COUNCIL_SIZE distinct members.
+            for (i, m) in members.iter().enumerate() {
+                if members.iter().skip(i.saturating_add(1)).any(|other| other == m) {
+                    return Err(Error::InvalidCouncil);
+                }
+            }
+            self.council = members.clone();
+            self.env().emit_event(CouncilSet { members });
+            Ok(())
         }
 
         /// Returns the current governance parameters.
@@ -270,7 +347,7 @@ mod governance {
             self.snapshots.get(epoch)
         }
 
-        /// Commits a new off-chain snapshot and returns its epoch; admin-only.
+        /// Commits a new off-chain snapshot and returns its epoch; council-only (operational duty).
         ///
         /// `root` is the Merkle root over `(coldkey, hotkey, balance, multiplier_bps)` leaves (see
         /// [`Snapshot`]); `circulating_supply` is the alpha supply that the quorum is derived from;
@@ -283,7 +360,7 @@ mod governance {
             circulating_supply: u128,
             snapshot_block: u32,
         ) -> Result<u64> {
-            self.ensure_admin()?;
+            self.ensure_council()?;
             let epoch = self
                 .current_epoch
                 .checked_add(1)
@@ -340,10 +417,10 @@ mod governance {
             self.has_voted.contains((proposal_id, coldkey, hotkey))
         }
 
-        /// Updates the governance parameters; admin-only.
+        /// Updates the governance parameters; maintainer-only.
         #[ink(message)]
         pub fn update_params(&mut self, new_params: GovernanceParams) -> Result<()> {
-            self.ensure_admin()?;
+            self.ensure_maintainer()?;
             if new_params.approval_bps == 0 || new_params.approval_bps > BPS_DENOMINATOR {
                 return Err(Error::InvalidParams);
             }
@@ -609,9 +686,16 @@ mod governance {
             Ok(info.stake.0 as u128)
         }
 
-        fn ensure_admin(&self) -> Result<()> {
-            if self.env().caller() != self.admin {
-                return Err(Error::NotAdmin);
+        fn ensure_maintainer(&self) -> Result<()> {
+            if self.env().caller() != self.maintainer {
+                return Err(Error::NotMaintainer);
+            }
+            Ok(())
+        }
+
+        fn ensure_council(&self) -> Result<()> {
+            if !self.council.contains(&self.env().caller()) {
+                return Err(Error::NotCouncil);
             }
             Ok(())
         }
