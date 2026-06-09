@@ -6999,8 +6999,12 @@ version = "0.1.0"
 dependencies = [
  "ink",
  "ink_e2e",
+ "tusdt-auction",
  "tusdt-env",
+ "tusdt-oracle",
+ "tusdt-primitives",
  "tusdt-treasury",
+ "tusdt-vault",
 ]
 
 [[package]]

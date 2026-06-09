@@ -1,5 +1,7 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
+pub use self::vault::{TusdtVault, TusdtVaultRef, VaultContractParamsConfig};
+
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
 mod vault {
     use core::cmp::min;

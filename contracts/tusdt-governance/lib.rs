@@ -1,9 +1,9 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
 pub use self::governance::{
-    CouncilSet, GovernanceParams, MaintainerChanged, Proposal, ProposalExecuted,
-    ProposalFinalized, ProposalKind, ProposalStatus, ProposalSubmitted, Snapshot,
-    SnapshotSubmitted, TusdtGovernance, TusdtGovernanceRef, Voted,
+    CouncilSet, GovernanceParams, MaintainerChanged, Proposal, ProposalExecuted, ProposalFinalized,
+    ProposalKind, ProposalStatus, ProposalSubmitted, Snapshot, SnapshotSubmitted, TusdtGovernance,
+    TusdtGovernanceRef, Voted,
 };
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
@@ -12,7 +12,23 @@ mod governance {
     use ink::prelude::vec::Vec;
     use ink::storage::Mapping;
     use ink::{env::call::FromAccountId, ToAccountId};
+    use tusdt_auction::TusdtAuctionRef;
+    use tusdt_oracle::{PriceData, TusdtOracleRef};
+    use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
+    use tusdt_vault::{TusdtVaultRef, VaultContractParamsConfig};
+
+    // Cross-contract forwarders that let governance drive the vault, auction, and oracle.
+    // `forward_*` helpers defined here.
+    mod external_calls {
+        include!("external_calls.rs");
+    }
+
+    // Pure helpers split out for readability: numeric/calendar math and Merkle hashing/proofs.
+    mod helpers {
+        include!("helpers.rs");
+    }
+    pub(crate) use self::helpers::*;
 
     /// A 32-byte Blake2b-256 digest used for Merkle roots, leaves, and proof nodes.
     pub(crate) type MerkleHash = [u8; 32];
@@ -145,6 +161,12 @@ mod governance {
         /// members perform operational duties such as committing snapshots.
         council: Vec<AccountId>,
         treasury: TusdtTreasuryRef,
+        /// The vault, auction, and oracle this governance contract steers. After deployment the
+        /// vault's governance role (and, via the vault's propagation, the auction's and oracle's)
+        /// is handed to this contract, so these forwarding calls are accepted as `governance`.
+        vault: TusdtVaultRef,
+        auction: TusdtAuctionRef,
+        oracle: TusdtOracleRef,
         params: GovernanceParams,
         // Latest committed snapshot epoch; 0 means no snapshot has been submitted yet.
         current_epoch: u64,
@@ -245,23 +267,42 @@ mod governance {
         InvalidParams,
         NotPassed,
         TreasuryCallFailed,
+        VaultCallFailed,
+        AuctionCallFailed,
+        OracleCallFailed,
         ArithmeticError,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtGovernance {
-        /// Initializes governance with an explicit `maintainer`, a treasury reference, and default
-        /// params. The maintainer is passed in (typically the subnet owner) rather than defaulting
-        /// to the deployer; an election contract is expected to take over this role later. The
-        /// council starts empty and must be seated by the maintainer via [`set_council`].
+        /// Initializes governance with an explicit `maintainer`, references to the treasury, vault,
+        /// auction, and oracle contracts, and default params. The maintainer is passed in (typically
+        /// the subnet owner) rather than defaulting to the deployer; an election contract is expected
+        /// to take over this role later. The council starts empty and must be seated by the
+        /// maintainer via [`set_council`].
+        ///
+        /// The vault/auction/oracle addresses are wired so governance can forward privileged calls
+        /// to them once it holds their `governance` role (see [`external_calls`]).
         #[ink(constructor)]
-        pub fn new(treasury_address: AccountId, maintainer: AccountId) -> Self {
+        pub fn new(
+            treasury_address: AccountId,
+            vault_address: AccountId,
+            auction_address: AccountId,
+            oracle_address: AccountId,
+            maintainer: AccountId,
+        ) -> Self {
             let treasury = TusdtTreasuryRef::from_account_id(treasury_address);
+            let vault = TusdtVaultRef::from_account_id(vault_address);
+            let auction = TusdtAuctionRef::from_account_id(auction_address);
+            let oracle = TusdtOracleRef::from_account_id(oracle_address);
             Self {
                 maintainer,
                 council: Vec::new(),
                 treasury,
+                vault,
+                auction,
+                oracle,
                 params: GovernanceParams::default_params(),
                 current_epoch: 0,
                 snapshots: Mapping::default(),
@@ -320,13 +361,88 @@ mod governance {
             }
             // Reject duplicates so the committee really has COUNCIL_SIZE distinct members.
             for (i, m) in members.iter().enumerate() {
-                if members.iter().skip(i.saturating_add(1)).any(|other| other == m) {
+                if members
+                    .iter()
+                    .skip(i.saturating_add(1))
+                    .any(|other| other == m)
+                {
                     return Err(Error::InvalidCouncil);
                 }
             }
             self.council = members.clone();
             self.env().emit_event(CouncilSet { members });
             Ok(())
+        }
+
+        // ---------------------------------------------------------------------------------------
+        // Cross-contract forwarders. Each is a thin `#[ink(message)]` entry point delegating to a
+        // `forward_*` helper in `external_calls.rs`, where the authorization and the actual
+        // cross-contract call live. Maintainer-gated calls are governing/config actions (plus the
+        // emergency oracle price); `vault_pause` is the one council-gated
+        // operational call, kept fast for emergencies.
+        // ---------------------------------------------------------------------------------------
+
+        /// Schedules a vault contract-parameter update (behind the vault's timelock); maintainer-only.
+        #[ink(message)]
+        pub fn vault_set_contract_params(
+            &mut self,
+            params: VaultContractParamsConfig,
+        ) -> Result<()> {
+            self.forward_vault_set_contract_params(params)
+        }
+
+        /// Cancels the vault's currently scheduled contract-parameter update; maintainer-only.
+        #[ink(message)]
+        pub fn vault_cancel_contract_params_update(&mut self) -> Result<()> {
+            self.forward_vault_cancel_contract_params_update()
+        }
+
+        /// Updates the vault's treasury (fee recipient) account; maintainer-only.
+        #[ink(message)]
+        pub fn vault_update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
+            self.forward_vault_update_treasury(new_treasury)
+        }
+
+        /// Updates the vault's platform (pause operator) account; maintainer-only.
+        #[ink(message)]
+        pub fn vault_update_platform(&mut self, new_platform: AccountId) -> Result<()> {
+            self.forward_vault_update_platform(new_platform)
+        }
+
+        /// Unpauses the vault; maintainer-only (deliberate recovery).
+        #[ink(message)]
+        pub fn vault_unpause(&mut self) -> Result<()> {
+            self.forward_vault_unpause()
+        }
+
+        /// Pauses the vault; council-only (operational/emergency halt).
+        #[ink(message)]
+        pub fn vault_pause(&mut self) -> Result<()> {
+            self.forward_vault_pause()
+        }
+
+        /// Sets/clears the oracle's round-committing validator; maintainer-only.
+        #[ink(message)]
+        pub fn oracle_set_validator(&mut self, validator: Option<AccountId>) -> Result<()> {
+            self.forward_oracle_set_validator(validator)
+        }
+
+        /// Updates the oracle's max allowed price deviation; maintainer-only.
+        #[ink(message)]
+        pub fn oracle_set_max_price_deviation(&mut self, max_price_deviation: Ratio) -> Result<()> {
+            self.forward_oracle_set_max_price_deviation(max_price_deviation)
+        }
+
+        /// Commits an emergency oracle price, bypassing quorum/deviation checks; maintainer-only
+        #[ink(message)]
+        pub fn oracle_commit_round(&mut self, price: Ratio) -> Result<PriceData> {
+            self.forward_oracle_commit_round(price)
+        }
+
+        /// Sets/clears the auction admin (allowed to bid on expired no-bid auctions); maintainer-only.
+        #[ink(message)]
+        pub fn auction_set_admin(&mut self, admin: Option<AccountId>) -> Result<()> {
+            self.forward_auction_set_admin(admin)
         }
 
         /// Returns the current governance parameters.
@@ -699,100 +815,6 @@ mod governance {
             }
             Ok(())
         }
-    }
-
-    /// Returns the UTC day-of-month (1..=31) for a Unix-epoch timestamp in milliseconds.
-    ///
-    /// Uses Howard Hinnant's `civil_from_days` algorithm. Timestamps are always post-1970, so the
-    /// day count is non-negative and the negative-era branch of the general algorithm is omitted —
-    /// all arithmetic stays in u64. The constants and ranges are well-known and bounded
-    /// (e.g. `doy <= 365`, `mp <= 11`, `day <= 31`), so `as u8` is safe.
-    //
-    // The Hinnant algorithm relies on standard `+`/`-`/`*`/`/` and is provably non-overflowing for
-    // any u64 millisecond timestamp; rewriting it with `checked_*` everywhere would obscure the
-    // structure without adding safety.
-    #[allow(clippy::arithmetic_side_effects, clippy::cast_possible_truncation)]
-    pub(crate) fn day_of_month(timestamp_ms: u64) -> u8 {
-        // Days since the 1970-01-01 epoch.
-        let days: u64 = timestamp_ms / MS_PER_DAY;
-        // Shift the era origin to 0000-03-01 so leap days fall at the end of the 400-year cycle.
-        let z: u64 = days + 719_468;
-        let era: u64 = z / 146_097;
-        let doe: u64 = z - era * 146_097; // day-of-era, [0, 146096]
-        let yoe: u64 = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365; // year-of-era, [0, 399]
-        let doy: u64 = doe - (365 * yoe + yoe / 4 - yoe / 100); // day-of-year (Mar-based), [0, 365]
-        let mp: u64 = (5 * doy + 2) / 153; // month, Mar=0..Feb=11
-        let day: u64 = doy - (153 * mp + 2) / 5 + 1; // day-of-month, [1, 31]
-        day as u8
-    }
-
-    /// Integer (floor) square root of `n`, via Newton's method. No floats are available on-chain.
-    //
-    // Newton's iteration is monotonically decreasing and bounded; no operation can overflow for
-    // any u128 input. Annotating with checked_* every step would mask the standard form.
-    #[allow(clippy::arithmetic_side_effects)]
-    pub(crate) fn integer_sqrt(n: u128) -> u128 {
-        if n < 2 {
-            return n;
-        }
-        let mut x = n;
-        let mut y = x.div_ceil(2);
-        while y < x {
-            x = y;
-            y = (x + n / x) / 2;
-        }
-        x
-    }
-
-    /// Voting power for a snapshot leaf: `sqrt(balance) * multiplier_bps / 10_000`.
-    /// The square root dampens large stakes; the time-staked `multiplier_bps` rewards longer-held
-    /// stake (0.5x = 5_000, 0.8x = 8_000, 1.0x = 10_000).
-    pub(crate) fn voting_power(balance: u128, multiplier_bps: u32) -> Result<u128> {
-        integer_sqrt(balance)
-            .checked_mul(u128::from(multiplier_bps))
-            .and_then(|scaled| scaled.checked_div(u128::from(BPS_DENOMINATOR)))
-            .ok_or(Error::ArithmeticError)
-    }
-
-    /// Computes a snapshot leaf hash: `blake2_256(SCALE(coldkey, hotkey, balance, multiplier_bps))`.
-    /// Off-chain proof generation must encode and hash the tuple identically.
-    pub(crate) fn leaf_hash(
-        coldkey: AccountId,
-        hotkey: AccountId,
-        balance: u128,
-        multiplier_bps: u32,
-    ) -> MerkleHash {
-        let mut out = MerkleHash::default();
-        ink::env::hash_encoded::<ink::env::hash::Blake2x256, _>(
-            &(coldkey, hotkey, balance, multiplier_bps),
-            &mut out,
-        );
-        out
-    }
-
-    /// Hashes a pair of sibling nodes in sorted order: `blake2_256(min(a,b) ++ max(a,b))`.
-    /// Sorting lets proofs omit per-node position flags (OpenZeppelin convention).
-    pub(crate) fn hash_pair(a: MerkleHash, b: MerkleHash) -> MerkleHash {
-        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-        let mut input = [0u8; 64];
-        input[..32].copy_from_slice(&lo);
-        input[32..].copy_from_slice(&hi);
-        let mut out = MerkleHash::default();
-        ink::env::hash_bytes::<ink::env::hash::Blake2x256>(&input, &mut out);
-        out
-    }
-
-    /// Verifies that `leaf` is part of the tree with the given `root`, folding `proof` bottom-up.
-    pub(crate) fn verify_merkle_proof(
-        proof: &[MerkleHash],
-        root: MerkleHash,
-        leaf: MerkleHash,
-    ) -> bool {
-        let mut computed = leaf;
-        for sibling in proof {
-            computed = hash_pair(computed, *sibling);
-        }
-        computed == root
     }
 }
 

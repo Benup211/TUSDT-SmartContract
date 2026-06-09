@@ -12,6 +12,7 @@ use super::governance::*;
 use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 use tusdt_env::StakeInfo;
+use tusdt_primitives::Ratio;
 use tusdt_treasury::{Fund, TokenKind};
 
 /// Default mocked stake (in base units) returned for the proposer, comfortably above the
@@ -81,8 +82,16 @@ fn make_governance_no_snapshot() -> TusdtGovernance {
     register_stake(Some(STAKE_ABOVE_FLOOR));
     // Default the clock inside the submission window; individual tests can override.
     set_block_timestamp(IN_WINDOW_TS);
-    // Maintainer is alice (the caller); the treasury address is a stand-in account.
-    let mut gov = TusdtGovernance::new(accounts.django, accounts.alice);
+    // Maintainer is alice (the caller). The treasury/vault/auction/oracle addresses are stand-in
+    // accounts: unit tests exercise authorization, not live cross-contract calls (those require a
+    // deployed callee), so any valid AccountId works here.
+    let mut gov = TusdtGovernance::new(
+        accounts.django,
+        accounts.eve,
+        accounts.frank,
+        accounts.charlie,
+        accounts.alice,
+    );
     // Seat a full council including alice so operational duties (submit_snapshot) work under the
     // default caller. frank is intentionally left out as a non-council account for negative tests.
     gov.set_council(ink::prelude::vec![
@@ -719,10 +728,7 @@ fn set_maintainer_rejects_non_maintainer() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
     set_caller(accounts.bob);
-    assert_eq!(
-        gov.set_maintainer(accounts.bob),
-        Err(Error::NotMaintainer)
-    );
+    assert_eq!(gov.set_maintainer(accounts.bob), Err(Error::NotMaintainer));
     assert_eq!(gov.maintainer(), accounts.alice);
 }
 
@@ -786,4 +792,63 @@ fn set_council_rejects_duplicates() {
         ]),
         Err(Error::InvalidCouncil)
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// Cross-contract forwarder authorization. These assert the role gate rejects the wrong caller
+// *before* any cross-contract call is attempted (a live call would need a deployed callee, which
+// off-chain unit tests don't provide). The happy paths are covered by e2e tests, not here.
+// ---------------------------------------------------------------------------------------------
+
+#[ink::test]
+fn vault_maintainer_forwarders_reject_non_maintainer() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    // bob is a council member but not the maintainer.
+    set_caller(accounts.bob);
+    assert_eq!(
+        gov.vault_update_treasury(accounts.bob),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(
+        gov.vault_update_platform(accounts.bob),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(gov.vault_unpause(), Err(Error::NotMaintainer));
+    assert_eq!(
+        gov.vault_cancel_contract_params_update(),
+        Err(Error::NotMaintainer)
+    );
+}
+
+#[ink::test]
+fn oracle_and_auction_maintainer_forwarders_reject_non_maintainer() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    set_caller(accounts.bob);
+    assert_eq!(
+        gov.oracle_set_validator(Some(accounts.bob)),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(
+        gov.oracle_set_max_price_deviation(Ratio::from_basis_points(500)),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(
+        gov.auction_set_admin(Some(accounts.bob)),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(
+        gov.oracle_commit_round(Ratio::from_basis_points(10_000)),
+        Err(Error::NotMaintainer)
+    );
+}
+
+#[ink::test]
+fn council_forwarders_reject_non_council() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    let mut gov = make_governance();
+    // frank is neither maintainer nor a council member.
+    set_caller(accounts.frank);
+    assert_eq!(gov.vault_pause(), Err(Error::NotCouncil));
 }
