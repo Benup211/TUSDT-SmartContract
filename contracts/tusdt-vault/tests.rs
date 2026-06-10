@@ -322,26 +322,26 @@ fn governance_can_be_updated_by_current_governance() {
 }
 
 #[ink::test]
-fn platform_can_be_updated_by_governance() {
+fn treasury_can_be_updated_by_governance() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut vault = TusdtVault::new_for_test(accounts.alice);
 
-    assert_eq!(vault.platform(), accounts.alice);
+    assert_eq!(vault.treasury(), accounts.alice);
 
     set_caller(accounts.bob);
     assert_eq!(
-        vault.update_platform(accounts.charlie),
+        vault.update_treasury(accounts.charlie),
         Err(Error::NotGovernance)
     );
-    assert_eq!(vault.platform(), accounts.alice);
+    assert_eq!(vault.treasury(), accounts.alice);
 
     set_caller(accounts.alice);
-    assert_eq!(vault.update_platform(accounts.charlie), Ok(()));
-    assert_eq!(vault.platform(), accounts.charlie);
+    assert_eq!(vault.update_treasury(accounts.charlie), Ok(()));
+    assert_eq!(vault.treasury(), accounts.charlie);
 
     assert_eq!(vault.update_governance(accounts.bob), Ok(()));
     assert_eq!(vault.governance(), accounts.bob);
-    assert_eq!(vault.platform(), accounts.charlie);
+    assert_eq!(vault.treasury(), accounts.charlie);
 }
 
 #[ink::test]
@@ -407,15 +407,6 @@ fn platform_can_pause_but_not_unpause() {
     set_caller(accounts.alice);
     assert_eq!(vault.unpause(), Ok(()));
     assert!(!vault.paused());
-}
-
-#[ink::test]
-fn claim_surplus_tusdt_requires_governance() {
-    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
-    let mut vault = TusdtVault::new_for_test(accounts.alice);
-
-    set_caller(accounts.bob);
-    assert_eq!(vault.claim_surplus_tusdt(1), Err(Error::NotGovernance));
 }
 
 #[ink::test]
@@ -658,7 +649,7 @@ fn transaction_fee_helpers_use_percentage_math() {
     assert_eq!(vault.calculate_transaction_fee(10_000), Ok(3));
     assert_eq!(vault.calculate_transaction_fee(3), Ok(0));
 
-    assert_eq!(vault.transfer_transaction_fee_to_platform(0), Ok(()));
+    assert_eq!(vault.transfer_transaction_fee_to_treasury(0), Ok(()));
 }
 
 #[ink::test]

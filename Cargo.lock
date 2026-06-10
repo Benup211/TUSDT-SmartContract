@@ -6994,6 +6994,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "tusdt-governance"
+version = "0.1.0"
+dependencies = [
+ "ink",
+ "ink_e2e",
+ "tusdt-auction",
+ "tusdt-env",
+ "tusdt-oracle",
+ "tusdt-primitives",
+ "tusdt-treasury",
+ "tusdt-vault",
+]
+
+[[package]]
 name = "tusdt-oracle"
 version = "0.1.0"
 dependencies = [
@@ -7009,6 +7023,16 @@ version = "0.1.0"
 dependencies = [
  "ink",
  "sp-arithmetic",
+]
+
+[[package]]
+name = "tusdt-treasury"
+version = "0.1.0"
+dependencies = [
+ "ink",
+ "ink_e2e",
+ "tusdt-env",
+ "tusdt-erc20",
 ]
 
 [[package]]
