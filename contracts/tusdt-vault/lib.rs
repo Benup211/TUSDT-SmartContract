@@ -15,7 +15,7 @@ mod vault {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 60 * 1_000;
 
     mod params {
         include!("params.rs");
@@ -496,7 +496,7 @@ mod vault {
         /// Updates the platform (pause-capable operator) account; governance-only.
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_governance_or_platform()?;
 
             let previous_platform = self.platform;
             self.platform = new_platform;
