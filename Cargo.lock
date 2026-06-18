@@ -6977,6 +6977,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tusdt-election"
+version = "0.1.0"
+dependencies = [
+ "ink",
+ "ink_e2e",
+ "tusdt-env",
+ "tusdt-voting",
+]
+
+[[package]]
 name = "tusdt-env"
 version = "0.1.0"
 dependencies = [
@@ -7000,11 +7010,13 @@ dependencies = [
  "ink",
  "ink_e2e",
  "tusdt-auction",
+ "tusdt-election",
  "tusdt-env",
  "tusdt-oracle",
  "tusdt-primitives",
  "tusdt-treasury",
  "tusdt-vault",
+ "tusdt-voting",
 ]
 
 [[package]]
@@ -7046,6 +7058,13 @@ dependencies = [
  "tusdt-erc20",
  "tusdt-oracle",
  "tusdt-primitives",
+]
+
+[[package]]
+name = "tusdt-voting"
+version = "0.1.0"
+dependencies = [
+ "ink",
 ]
 
 [[package]]

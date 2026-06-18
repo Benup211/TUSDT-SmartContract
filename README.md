@@ -105,14 +105,16 @@ address — so the treasury is deployed after the vault and wired in via `update
 6. Instantiate Treasury (`tusdt-treasury::new`) with the vault's TUSDT token address. The deployer
    becomes the treasury's initial governance.
 7. Point the vault's fee recipient at the treasury: `tusdt-vault::update_treasury(treasury)`.
-8. Instantiate Governance (`tusdt-governance::new`) with `treasury`, `vault`, `auction`, `oracle`
-   addresses and the initial `maintainer` (typically the subnet owner).
-9. Hand control to the governance contract:
-   - `tusdt-treasury::set_governance(governance)` — only governance may release funds afterward.
-   - `tusdt-vault::update_governance(governance)` — propagates the role to the auction and oracle too.
-10. Seat the council: as the maintainer, call `tusdt-governance::set_council([c1..c5])`.
+8. Upload Election code (`tusdt-election`) and capture code hash.
+9. Instantiate Governance (`tusdt-governance::new`) with the `treasury`, `vault`, `auction`, `oracle`
+   addresses, the initial `maintainer` (typically the subnet owner), and the `election_code_hash`.
+   Governance **instantiates the election itself** in its constructor.
+10. Hand control to the governance contract:
+    - `tusdt-treasury::set_governance(governance)` — only governance may release funds afterward.
+    - `tusdt-vault::update_governance(governance)` — propagates the role to the auction and oracle too.
+11. Seat the council: as the maintainer, call `tusdt-governance::set_council([c1..c5])`.
 
-After step 10 the protocol contracts are steered exclusively by the governance contract, and within
+After step 11 the protocol contracts are steered exclusively by the governance contract, and within
 governance the maintainer/council split (see [Governance & Treasury](#governance--treasury)) applies.
 
 Example CLI for the protocol layer (adjust URL/account):
@@ -146,17 +148,22 @@ cargo contract instantiate \
   --args <TUSDT_TOKEN_ADDRESS> \
   --suri //Alice --url ws://127.0.0.1:9944
 
+cargo contract upload \
+  --manifest-path contracts/tusdt-election/Cargo.toml \
+  --suri //Alice --url ws://127.0.0.1:9944
+
 cargo contract instantiate \
   --manifest-path contracts/tusdt-governance/Cargo.toml \
   --constructor new \
   --args <TREASURY_ADDRESS> <VAULT_ADDRESS> <AUCTION_ADDRESS> <ORACLE_ADDRESS> <MAINTAINER> \
+         <ELECTION_CODE_HASH> \
   --suri //Alice --url ws://127.0.0.1:9944
 ```
 
 Prefer the `tools/` workflow above instead of using `cargo contract` for upload/deploy operations
 where a TS script already exists. The current e2e test suite is intentionally oracle-only, the only
-deployment script entrypoint is `vault:deploy`, and the treasury/governance contracts have no TS
-scripts yet — deploy and wire them with `cargo contract` as shown.
+deployment script entrypoint is `vault:deploy`, and the treasury/governance/election contracts have
+no TS scripts yet — deploy and wire them with `cargo contract` as shown.
 
 ## Working Flow
 
@@ -215,10 +222,8 @@ Default vault params:
 
 `tusdt-governance` carries two roles in addition to token-holder voting:
 
-- **Maintainer** — the top authority (typically the subnet owner; an election contract is expected
-  to hold this role later). Passed in at construction. The maintainer transfers its own role
-  (`set_maintainer`), seats the council (`set_council`), updates governance parameters
-  (`update_params`), and drives the protocol config forwarders below.
+- **Maintainer** — the top authority (the elected subnet owner). Set initially at construction and thereafter replaced **only** by the election contract via `elect_maintainer`. The maintainer seats the council (`set_council`), updates governance parameters (`update_params`), and drives the protocol config forwarders below.
+  The election contract — instantiated by governance's constructor — runs the election and installs the winner as maintainer.
 - **Council** — a fixed committee of exactly 5 members set by the maintainer. The council performs
   operational duties: committing voting snapshots (`submit_snapshot`) and the emergency vault halt
   (`vault_pause`). Any single council member can act on these.
@@ -265,7 +270,7 @@ governance until `set_governance` hands control to the governance contract.
 - Oracle: `get_latest_price`, `get_current_round_summary`, `is_reporter`
 - Auction: `get_auction`, `get_active_vault_auction`, `get_bid`, `get_all_auctions`, `get_active_auctions`
 - Token: `balance_of`, `allowance`, `total_supply`
-- Governance: `maintainer`, `council`, `is_council`, `params`, `current_epoch`, `get_snapshot`, `quorum`, `proposal_count`, `get_proposal`, `has_voted`
+- Governance: `maintainer`, `election`, `netuid`, `council`, `is_council`, `params`, `current_epoch`, `get_snapshot`, `quorum`, `proposal_count`, `get_proposal`, `has_voted`
 - Treasury: `governance`, `token`, `fund_balance_tusdt`, `fund_balance_native`
 
 ## Notes

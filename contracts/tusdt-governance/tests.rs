@@ -82,15 +82,17 @@ fn make_governance_no_snapshot() -> TusdtGovernance {
     register_stake(Some(STAKE_ABOVE_FLOOR));
     // Default the clock inside the submission window; individual tests can override.
     set_block_timestamp(IN_WINDOW_TS);
-    // Maintainer is alice (the caller). The treasury/vault/auction/oracle addresses are stand-in
-    // accounts: unit tests exercise authorization, not live cross-contract calls (those require a
-    // deployed callee), so any valid AccountId works here.
-    let mut gov = TusdtGovernance::new(
+    // Maintainer is alice (the caller). The treasury/vault/auction/oracle/election addresses are
+    // stand-in accounts: unit tests exercise authorization, not live cross-contract calls (those
+    // require a deployed callee), so any valid AccountId works here. frank stands in for the
+    // election contract (it's also the non-council account used by negative tests).
+    let mut gov = TusdtGovernance::from_addresses(
         accounts.django,
         accounts.eve,
         accounts.frank,
         accounts.charlie,
         accounts.alice,
+        accounts.frank,
     );
     // Seat a full council including alice so operational duties (submit_snapshot) work under the
     // default caller. frank is intentionally left out as a non-council account for negative tests.
@@ -139,8 +141,9 @@ fn constructor_sets_maintainer_and_defaults() {
     assert!(gov.is_council(accounts.alice));
     assert!(!gov.is_council(accounts.frank));
     assert_eq!(gov.proposal_count(), 0);
+    // netuid is a top-level field (bound to the maintainer), not a tunable param.
+    assert_eq!(gov.netuid(), 113);
     let p = gov.params();
-    assert_eq!(p.netuid, 113);
     assert_eq!(p.voting_period_ms, 48 * 60 * 60 * 1_000);
     assert_eq!(p.approval_bps, 5_001);
     assert_eq!(p.quorum_bps, 2_000);
@@ -539,12 +542,10 @@ fn update_params_rejects_zero_voting_period() {
 fn update_params_happy_path() {
     let mut gov = make_governance();
     let mut p = GovernanceParams::default_params();
-    p.netuid = 42;
     p.quorum_bps = 3_000;
     p.approval_bps = 6_667;
     p.voting_period_ms = 60 * 1_000;
     gov.update_params(p).expect("update ok");
-    assert_eq!(gov.params().netuid, 42);
     assert_eq!(gov.params().quorum_bps, 3_000);
     assert_eq!(gov.params().approval_bps, 6_667);
     assert_eq!(gov.params().voting_period_ms, 60 * 1_000);
@@ -706,29 +707,44 @@ fn finalize_rejects_when_voted_balance_below_quorum() {
 }
 
 #[ink::test]
-fn set_maintainer_transfers_role() {
+fn election_installs_maintainer() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
-    gov.set_maintainer(accounts.bob).expect("transfer ok");
-    assert_eq!(gov.maintainer(), accounts.bob);
+    // The election contract is fixed at construction (frank stands in for it).
+    assert_eq!(gov.election(), accounts.frank);
 
-    // The old maintainer (alice) can no longer govern; the new one can.
+    // Only the election may install the maintainer; the maintainer cannot self-transfer.
+    set_caller(accounts.alice);
+    assert_eq!(gov.elect_maintainer(accounts.bob), Err(Error::NotElection));
+
+    // The election installs bob, and can apply a netuid switch.
+    set_caller(accounts.frank);
+    gov.elect_maintainer(accounts.bob).expect("elect ok");
+    assert_eq!(gov.maintainer(), accounts.bob);
+    gov.election_set_netuid(99).expect("netuid ok");
+    assert_eq!(gov.netuid(), 99);
+
+    // The new maintainer governs; the old one no longer does.
+    set_caller(accounts.bob);
+    gov.update_params(GovernanceParams::default_params())
+        .expect("update ok");
     set_caller(accounts.alice);
     assert_eq!(
         gov.update_params(GovernanceParams::default_params()),
         Err(Error::NotMaintainer)
     );
-    set_caller(accounts.bob);
-    gov.update_params(GovernanceParams::default_params())
-        .expect("update ok");
 }
 
 #[ink::test]
-fn set_maintainer_rejects_non_maintainer() {
+fn election_entries_reject_non_election_callers() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
+    // Neither the maintainer (alice) nor a council member can drive the election-gated entries.
+    set_caller(accounts.alice);
+    assert_eq!(gov.elect_maintainer(accounts.bob), Err(Error::NotElection));
+    assert_eq!(gov.election_set_netuid(7), Err(Error::NotElection));
     set_caller(accounts.bob);
-    assert_eq!(gov.set_maintainer(accounts.bob), Err(Error::NotMaintainer));
+    assert_eq!(gov.elect_maintainer(accounts.bob), Err(Error::NotElection));
     assert_eq!(gov.maintainer(), accounts.alice);
 }
 
