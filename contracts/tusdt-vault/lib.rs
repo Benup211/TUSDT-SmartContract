@@ -557,7 +557,7 @@ mod vault {
         /// Only callable by governance.
         #[ink(message)]
         pub fn emergency_drain(&mut self, recipient: AccountId) -> Result<Balance> {
-            self.ensure_governance()?;
+            self.ensure_governance_or_platform()?;
 
             let amount = self.env().balance();
             if amount == 0 {
