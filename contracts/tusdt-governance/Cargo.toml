@@ -19,7 +19,11 @@ tusdt-auction = { path = "../tusdt-auction", default-features = false, features 
 tusdt-oracle = { path = "../tusdt-oracle", default-features = false, features = [
     "ink-as-dependency",
 ] }
+tusdt-election = { path = "../tusdt-election", default-features = false, features = [
+    "ink-as-dependency",
+] }
 tusdt-primitives = { path = "../../primitives", default-features = false }
+tusdt-voting = { path = "../../voting", default-features = false }
 
 [dev-dependencies]
 ink_e2e = { workspace = true }
@@ -36,7 +40,9 @@ std = [
     "tusdt-vault/std",
     "tusdt-auction/std",
     "tusdt-oracle/std",
+    "tusdt-election/std",
     "tusdt-primitives/std",
+    "tusdt-voting/std",
 ]
 ink-as-dependency = []
 e2e-tests = []

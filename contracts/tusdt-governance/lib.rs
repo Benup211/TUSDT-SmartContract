@@ -13,6 +13,7 @@ mod governance {
     use ink::storage::Mapping;
     use ink::{env::call::FromAccountId, ToAccountId};
     use tusdt_auction::TusdtAuctionRef;
+    use tusdt_election::TusdtElectionRef;
     use tusdt_oracle::{PriceData, TusdtOracleRef};
     use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
@@ -24,21 +25,14 @@ mod governance {
         include!("external_calls.rs");
     }
 
-    // Pure helpers split out for readability: numeric/calendar math and Merkle hashing/proofs.
-    mod helpers {
-        include!("helpers.rs");
-    }
-    pub(crate) use self::helpers::*;
-
-    /// A 32-byte Blake2b-256 digest used for Merkle roots, leaves, and proof nodes.
-    pub(crate) type MerkleHash = [u8; 32];
+    // Snapshot/voting helpers (Merkle hashing/proofs, quadratic time-staked weighting, day-of-month)
+    pub(crate) use tusdt_voting::*;
 
     /// Maximum CID byte length accepted by `submit_proposal` (CIDv1 base32 is ~62 chars).
     pub(crate) const MAX_CID_LEN: usize = 96;
     /// The council is a fixed-size committee; [`TusdtGovernance::set_council`] requires exactly
     /// this many distinct members.
     pub(crate) const COUNCIL_SIZE: usize = 5;
-    pub(crate) const BPS_DENOMINATOR: u32 = 10_000;
     pub(crate) const DEFAULT_NETUID: u16 = 113;
     pub(crate) const DEFAULT_VOTING_PERIOD_MS: u64 = 48 * 60 * 60 * 1_000;
     pub(crate) const DEFAULT_APPROVAL_BPS: u32 = 5_001;
@@ -48,15 +42,12 @@ mod governance {
     /// Proposals may only be submitted on these days of the month (inclusive), in UTC.
     pub(crate) const DEFAULT_SUBMISSION_OPEN_DAY: u8 = 5;
     pub(crate) const DEFAULT_SUBMISSION_CLOSE_DAY: u8 = 25;
-    /// Milliseconds in a day; block timestamps are Unix epoch milliseconds.
-    pub(crate) const MS_PER_DAY: u64 = 86_400_000;
 
     /// Tunable governance parameters. Updatable by the maintainer.
     #[derive(Debug, Copy, Clone)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct GovernanceParams {
-        pub netuid: u16,
         pub voting_period_ms: u64,
         /// Quorum as a fraction of the alpha circulating supply, in basis points (2_000 = 20%).
         /// A proposal passes only if the raw balance that voted reaches `circulating_supply *
@@ -73,7 +64,6 @@ mod governance {
     impl GovernanceParams {
         pub fn default_params() -> Self {
             Self {
-                netuid: DEFAULT_NETUID,
                 voting_period_ms: DEFAULT_VOTING_PERIOD_MS,
                 quorum_bps: DEFAULT_QUORUM_BPS,
                 approval_bps: DEFAULT_APPROVAL_BPS,
@@ -152,10 +142,13 @@ mod governance {
     /// Governance storage.
     #[ink(storage)]
     pub struct TusdtGovernance {
-        /// Top authority: governs parameters and council membership, and can transfer its own
-        /// role. Passed in at construction; an election contract is expected to hold this role
-        /// once it lands.
+        /// Top authority: governs parameters and council membership. This is the *elected* account
+        /// (the winning subnet owner), not a contract. It is replaced only by the election contract
+        /// via [`TusdtGovernance::elect_maintainer`].
         maintainer: AccountId,
+        /// The election contract. It is authorized to install the maintainer (`elect_maintainer`)
+        /// and apply netuid switches (`election_set_netuid`).
+        election: TusdtElectionRef,
         /// The operating committee, set by the maintainer via [`TusdtGovernance::set_council`].
         /// Holds exactly [`COUNCIL_SIZE`] members once seated (empty until the first call); council
         /// members perform operational duties such as committing snapshots.
@@ -167,6 +160,9 @@ mod governance {
         vault: TusdtVaultRef,
         auction: TusdtAuctionRef,
         oracle: TusdtOracleRef,
+        /// The subnet whose alpha stake gates proposer eligibility. Bound to the elected maintainer
+        /// (the subnet they govern) — only the election contract changes it, via [`TusdtGovernance::election_set_netuid`].
+        netuid: u16,
         params: GovernanceParams,
         // Latest committed snapshot epoch; 0 means no snapshot has been submitted yet.
         current_epoch: u64,
@@ -218,7 +214,7 @@ mod governance {
         proposal_id: u64,
     }
 
-    /// Emitted when the maintainer role is transferred.
+    /// Emitted when the maintainer role is transferred (by the election contract).
     #[ink(event)]
     pub struct MaintainerChanged {
         #[ink(topic)]
@@ -248,6 +244,7 @@ mod governance {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
         NotMaintainer,
+        NotElection,
         NotCouncil,
         InvalidCouncil,
         ProposalNotFound,
@@ -278,9 +275,14 @@ mod governance {
     impl TusdtGovernance {
         /// Initializes governance with an explicit `maintainer`, references to the treasury, vault,
         /// auction, and oracle contracts, and default params. The maintainer is passed in (typically
-        /// the subnet owner) rather than defaulting to the deployer; an election contract is expected
-        /// to take over this role later. The council starts empty and must be seated by the
-        /// maintainer via [`set_council`].
+        /// the subnet owner) rather than defaulting to the deployer.
+        ///
+        /// The election contract is **instantiated here** from `election_code_hash` and retained;
+        /// it is authorized to install maintainers (`elect_maintainer`) and apply netuid switches
+        /// (`election_set_netuid`). The initial maintainer is also seated as the election's initial
+        /// incumbent. The election derives its genesis cadence anchor from the deployment block
+        /// timestamp and its candidate stake bar from its own constant. The council starts empty and
+        /// must be seated by the maintainer via [`set_council`].
         ///
         /// The vault/auction/oracle addresses are wired so governance can forward privileged calls
         /// to them once it holds their `governance` role (see [`external_calls`]).
@@ -291,18 +293,48 @@ mod governance {
             auction_address: AccountId,
             oracle_address: AccountId,
             maintainer: AccountId,
+            election_code_hash: Hash,
         ) -> Self {
-            let treasury = TusdtTreasuryRef::from_account_id(treasury_address);
-            let vault = TusdtVaultRef::from_account_id(vault_address);
-            let auction = TusdtAuctionRef::from_account_id(auction_address);
-            let oracle = TusdtOracleRef::from_account_id(oracle_address);
+            // Instantiate the election, handing it this contract's address so it can call back into
+            // `elect_maintainer` / `election_set_netuid` and read snapshots. The initial maintainer
+            // is its incumbent, governing the default subnet.
+            let election =
+                TusdtElectionRef::new(Self::env().account_id(), maintainer, DEFAULT_NETUID)
+                    .code_hash(election_code_hash)
+                    .endowment(0)
+                    .salt_bytes([0u8; 32])
+                    .instantiate();
+            Self::from_addresses(
+                treasury_address,
+                vault_address,
+                auction_address,
+                oracle_address,
+                maintainer,
+                election.to_account_id(),
+            )
+        }
+
+        /// Builds the storage struct from the addresses of the already-deployed peer contracts. Used
+        /// by [`new`] (after it instantiates the election) and by unit tests (which can't instantiate
+        /// cross-contracts, so they pass a stand-in `election` address that `ensure_election` checks
+        /// against). All refs are reconstructed from their `AccountId` via `FromAccountId`.
+        pub(crate) fn from_addresses(
+            treasury_address: AccountId,
+            vault_address: AccountId,
+            auction_address: AccountId,
+            oracle_address: AccountId,
+            maintainer: AccountId,
+            election: AccountId,
+        ) -> Self {
             Self {
                 maintainer,
+                election: TusdtElectionRef::from_account_id(election),
                 council: Vec::new(),
-                treasury,
-                vault,
-                auction,
-                oracle,
+                treasury: TusdtTreasuryRef::from_account_id(treasury_address),
+                vault: TusdtVaultRef::from_account_id(vault_address),
+                auction: TusdtAuctionRef::from_account_id(auction_address),
+                oracle: TusdtOracleRef::from_account_id(oracle_address),
+                netuid: DEFAULT_NETUID,
                 params: GovernanceParams::default_params(),
                 current_epoch: 0,
                 snapshots: Mapping::default(),
@@ -316,6 +348,18 @@ mod governance {
         #[ink(message)]
         pub fn maintainer(&self) -> AccountId {
             self.maintainer
+        }
+
+        /// Returns the governing subnet netuid (bound to the maintainer; set only by the election).
+        #[ink(message)]
+        pub fn netuid(&self) -> u16 {
+            self.netuid
+        }
+
+        /// Returns the election contract address (instantiated at construction).
+        #[ink(message)]
+        pub fn election(&self) -> AccountId {
+            self.election.to_account_id()
         }
 
         /// Returns the current council members (empty until the maintainer seats them).
@@ -336,18 +380,27 @@ mod governance {
             self.treasury.to_account_id()
         }
 
-        /// Transfers the maintainer role to `new_maintainer`; maintainer-only. This is the seam the
-        /// future election contract will drive: granting it this role hands maintainer authority to
-        /// election outcomes.
-        #[ink(message)]
-        pub fn set_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
-            self.ensure_maintainer()?;
+        /// Installs `new_maintainer` as the maintainer; callable only by the election contract.
+        /// The explicit selector is matched by the election's raw cross-contract call.
+        #[ink(message, selector = 0xE1EC7000)]
+        pub fn elect_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
+            self.ensure_election()?;
             let previous = self.maintainer;
             self.maintainer = new_maintainer;
             self.env().emit_event(MaintainerChanged {
                 previous,
                 new: new_maintainer,
             });
+            Ok(())
+        }
+
+        /// Sets the governing subnet `netuid`; callable only by the election contract (used when a
+        /// cross-subnet election transition completes). The explicit selector is matched by the
+        /// election's raw cross-contract call.
+        #[ink(message, selector = 0xE1EC7001)]
+        pub fn election_set_netuid(&mut self, netuid: u16) -> Result<()> {
+            self.ensure_election()?;
+            self.netuid = netuid;
             Ok(())
         }
 
@@ -461,6 +514,16 @@ mod governance {
         #[ink(message)]
         pub fn get_snapshot(&self, epoch: u64) -> Option<Snapshot> {
             self.snapshots.get(epoch)
+        }
+
+        /// Returns the latest committed snapshot packaged for the election contract as
+        /// `(root, circulating_supply, netuid, snapshot_block)`, or `None` if none committed yet.
+        /// The explicit selector is matched by the election's raw cross-contract call.
+        #[ink(message, selector = 0xE1EC7002)]
+        pub fn election_snapshot(&self) -> Option<(MerkleHash, u128, u16, u32)> {
+            self.snapshots
+                .get(self.current_epoch)
+                .map(|s| (s.root, s.circulating_supply, self.netuid, s.snapshot_block))
         }
 
         /// Commits a new off-chain snapshot and returns its epoch; council-only (operational duty).
@@ -674,7 +737,7 @@ mod governance {
                 return Err(Error::InvalidProof);
             }
 
-            let weight = voting_power(balance, multiplier_bps)?;
+            let weight = voting_power(balance, multiplier_bps).ok_or(Error::ArithmeticError)?;
             if weight == 0 {
                 return Err(Error::NoStake);
             }
@@ -796,7 +859,7 @@ mod governance {
             let info = self
                 .env()
                 .extension()
-                .get_stake_info_for_hotkey_coldkey_netuid(hotkey, coldkey, self.params.netuid)
+                .get_stake_info_for_hotkey_coldkey_netuid(hotkey, coldkey, self.netuid)
                 .map_err(|_| Error::StakeQueryFailed)?
                 .ok_or(Error::NoStake)?;
             Ok(info.stake.0 as u128)
@@ -805,6 +868,13 @@ mod governance {
         fn ensure_maintainer(&self) -> Result<()> {
             if self.env().caller() != self.maintainer {
                 return Err(Error::NotMaintainer);
+            }
+            Ok(())
+        }
+
+        fn ensure_election(&self) -> Result<()> {
+            if self.env().caller() != self.election.to_account_id() {
+                return Err(Error::NotElection);
             }
             Ok(())
         }

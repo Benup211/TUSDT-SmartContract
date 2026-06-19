@@ -1,0 +1,16 @@
+[package]
+name = "tusdt-voting"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ink = { workspace = true, default-features = false }
+
+[lib]
+path = "src/lib.rs"
+
+[features]
+default = ["std"]
+std = ["ink/std"]
