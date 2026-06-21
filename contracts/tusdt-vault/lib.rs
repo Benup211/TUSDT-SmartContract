@@ -338,9 +338,16 @@ mod vault {
 
     pub type Result<T> = core::result::Result<T, Error>;
 
+    /// Breaks a debt repayment into its principal and interest components.
+    ///
+    /// When a user repays TUSDT, the payment is first applied to any outstanding
+    /// (unpaid) interest, and the remainder reduces the principal debt balance.
+    /// This struct captures the split result so callers can log or emit both portions.
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct DebtPaymentBreakdown {
+        /// The portion of the repayment that reduces the borrowed principal.
         pub principal_payment: Balance,
+        /// The portion of the repayment that covers accrued but unpaid interest.
         pub interest_payment: Balance,
     }
 
@@ -493,7 +500,8 @@ mod vault {
             Ok(())
         }
 
-        /// Updates the platform (pause-capable operator) account; governance-only.
+        /// Updates the platform (pause-capable operator) account; callable by governance or the
+        /// current platform account.
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.ensure_governance_or_platform()?;

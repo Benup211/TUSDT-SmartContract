@@ -11,14 +11,20 @@ mod treasury {
     use ink::storage::Mapping;
     use tusdt_erc20::TusdtErc20Ref;
 
-    /// Distribution buckets for incoming platform earnings, in basis points.
+    /// Distribution share for the Emergency fund, in basis points (5,000 = 50%).
     #[allow(dead_code)]
     pub(crate) const EMERGENCY_BPS: u32 = 5000;
+    /// Distribution share for the Operation fund, in basis points (3,000 = 30%).
     pub(crate) const OPERATION_BPS: u32 = 3000;
+    /// Distribution share for the Insurance fund, in basis points (1,000 = 10%).
     pub(crate) const INSURANCE_BPS: u32 = 1000;
+    /// Distribution share for the Dividend fund, in basis points (400 = 4%).
     pub(crate) const DIVIDEND_BPS: u32 = 400;
+    /// Distribution share for the Buyback fund, in basis points (400 = 4%).
     pub(crate) const BUYBACK_BPS: u32 = 400;
+    /// Distribution share for the Voting fund, in basis points (200 = 2%).
     pub(crate) const VOTING_BPS: u32 = 200;
+    /// Sum of all distribution BPS; must equal 10,000 (100%) at construction time.
     pub(crate) const TOTAL_BPS: u32 = 10_000;
 
     /// Six flat treasury buckets. Incoming fees are split across these by the documented basis points.
@@ -280,6 +286,7 @@ mod treasury {
             Ok(())
         }
 
+        /// Ensures the caller is the current governance account. Reverts with `NotGovernance` otherwise.
         fn ensure_governance(&self) -> Result<()> {
             if self.env().caller() != self.governance {
                 return Err(Error::NotGovernance);

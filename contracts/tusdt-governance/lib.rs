@@ -622,7 +622,8 @@ mod governance {
         }
 
         /// Submits a new proposal. The caller is treated as the coldkey; `hotkey` is provided
-        /// explicitly and the pair's subnet alpha stake must exceed `MIN_PROPOSER_ALPHA_STAKE`.
+        /// explicitly and the pair's subnet alpha stake must exceed
+        /// `params.min_proposer_stake`, configurable via `update_params()`.
         #[ink(message)]
         pub fn submit_proposal(
             &mut self,
