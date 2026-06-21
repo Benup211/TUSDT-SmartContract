@@ -500,8 +500,7 @@ mod vault {
             Ok(())
         }
 
-        /// Updates the platform (pause-capable operator) account; callable by governance or the
-        /// current platform account.
+        /// Updates the platform (pause-capable operator) account; callable by governance account
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.ensure_governance()?;
