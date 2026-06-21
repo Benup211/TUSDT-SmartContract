@@ -504,7 +504,7 @@ mod vault {
         /// current platform account.
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
-            self.ensure_governance_or_platform()?;
+            self.ensure_governance()?;
 
             let previous_platform = self.platform;
             self.platform = new_platform;
