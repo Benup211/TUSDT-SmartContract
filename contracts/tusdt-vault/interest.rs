@@ -3,6 +3,16 @@ use ink::codegen::Env as _;
 use tusdt_primitives::{HOURS_PER_YEAR, MILLISECONDS_PER_HOUR};
 
 impl TusdtVault {
+    /// Accrues hourly-compounded interest on a vault's debt balance since the last accrual.
+    ///
+    /// Computes the number of whole hours elapsed since `vault.last_interest_accrued_at`,
+    /// then applies discrete compound growth at the configured annual rate:
+    /// `(1 + rate / 8760)^elapsed_hours`. Advances `last_interest_accrued_at` past the
+    /// fully-accrued hours so that partial-hour remainders are picked up on the next call.
+    /// Returns the interest delta (the increase in debt balance).
+    ///
+    /// This is a no-op when debt is zero, the interest rate is zero, or the block
+    /// timestamp has not advanced past the last accrual point.
     pub(crate) fn accrue_interest_for_vault(&self, vault: &mut Vault) -> Result<()> {
         let now = self.env().block_timestamp();
         if now <= vault.last_interest_accrued_at {
@@ -72,6 +82,14 @@ impl TusdtVault {
         Ok(())
     }
 
+    /// Adjusts `last_interest_accrued_at` to a weighted-average timestamp when a new borrow
+    /// changes the outstanding debt mid-hour.
+    ///
+    /// Without adjustment, interest for the full hour would be attributed to the
+    /// pre-borrow debt balance, under-charging interest on the newly borrowed amount.
+    /// This computes a debt-weighted average of the previous timestamp and the current
+    /// block time so that interest is fairly split between the pre-borrow and post-borrow
+    /// periods.
     pub(crate) fn adjust_last_interest_accrued_at_for_new_borrow(
         &self,
         vault: &mut Vault,

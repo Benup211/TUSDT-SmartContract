@@ -7,3 +7,4 @@
 # Ignore isolated Node tooling artifacts.
 /tools/node_modules/
 /tools/.env
+.claude/

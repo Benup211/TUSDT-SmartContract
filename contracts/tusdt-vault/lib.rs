@@ -15,7 +15,7 @@ mod vault {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 60 * 1_000;
 
     mod params {
         include!("params.rs");
@@ -269,6 +269,14 @@ mod vault {
         debt_cleared: Balance,
     }
 
+    /// Emitted when the entire native balance of the contract is drained to abandon the vault, for emergency migration to a new deployment; **TESTNET ONLY**.
+    #[ink(event)]
+    pub struct EmergencyDrained {
+        #[ink(topic)]
+        recipient: AccountId,
+        amount: Balance,
+    }
+
     /// Errors returned by the vault contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
@@ -330,9 +338,16 @@ mod vault {
 
     pub type Result<T> = core::result::Result<T, Error>;
 
+    /// Breaks a debt repayment into its principal and interest components.
+    ///
+    /// When a user repays TUSDT, the payment is first applied to any outstanding
+    /// (unpaid) interest, and the remainder reduces the principal debt balance.
+    /// This struct captures the split result so callers can log or emit both portions.
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct DebtPaymentBreakdown {
+        /// The portion of the repayment that reduces the borrowed principal.
         pub principal_payment: Balance,
+        /// The portion of the repayment that covers accrued but unpaid interest.
         pub interest_payment: Balance,
     }
 
@@ -348,6 +363,7 @@ mod vault {
             token_code_hash: Hash,
             auction_code_hash: Hash,
             oracle_code_hash: Hash,
+            netuid: u16,
         ) -> Self {
             let governance = Self::env().caller();
 
@@ -362,7 +378,7 @@ mod vault {
                 .endowment(0)
                 .salt_bytes([1; 32])
                 .instantiate();
-            let oracle = TusdtOracleRef::new(contract_account, governance)
+            let oracle = TusdtOracleRef::new(contract_account, governance, netuid)
                 .code_hash(oracle_code_hash)
                 .endowment(0)
                 .salt_bytes([2; 32])
@@ -485,7 +501,7 @@ mod vault {
             Ok(())
         }
 
-        /// Updates the platform (pause-capable operator) account; governance-only.
+        /// Updates the platform (pause-capable operator) account; callable by governance account
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -539,6 +555,34 @@ mod vault {
             });
 
             Ok(())
+        }
+
+        /// **TESTNET ONLY** — Drains the entire native balance of the contract to `recipient`.
+        ///
+        /// Use this before migrating to a new contract deployment when storage layout has
+        /// changed and you need to recover all collateral funds locked in this instance.
+        /// `total_collateral_balance` is zeroed so internal accounting stays consistent.
+        /// Only callable by governance.
+        #[ink(message)]
+        pub fn emergency_drain(&mut self, recipient: AccountId) -> Result<Balance> {
+            self.ensure_governance_or_platform()?;
+
+            let amount = self.env().balance();
+            if amount == 0 {
+                return Ok(0);
+            }
+
+            // Zero out accounting so any stale state cannot be acted on after the drain.
+            self.total_collateral_balance = 0;
+
+            if self.env().transfer(recipient, amount).is_err() {
+                return Err(Error::TransferFailed);
+            }
+            self.paused = true;
+            self.env().emit_event(Paused {});
+            self.env().emit_event(EmergencyDrained { recipient, amount });
+
+            Ok(amount)
         }
 
         /// Creates a new vault for the caller with the transferred collateral and returns the vault ID.

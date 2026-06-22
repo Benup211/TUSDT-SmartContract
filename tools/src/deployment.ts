@@ -118,6 +118,7 @@ export async function deployOracle(
   signer: KeyringPair,
   controllerAddress = signer.address,
   governanceAddress = signer.address,
+  netuid = 0,
   waitFor: ExtrinsicWaitFor = "inBlock",
 ): Promise<ContractPromise> {
   const artifact = loadContractArtifact("oracle");
@@ -127,7 +128,7 @@ export async function deployOracle(
     artifact.abi,
     artifact.wasm,
     "new",
-    [controllerAddress, governanceAddress],
+    [controllerAddress, governanceAddress, netuid],
     waitFor,
   );
 
@@ -137,9 +138,11 @@ export async function deployOracle(
 export async function deployVault(
   api: ApiPromise,
   signer: KeyringPair,
+  treasuryAddress: string,
   tokenCodeHash: string,
   auctionCodeHash: string,
   oracleCodeHash: string,
+  netuid: number,
   waitFor: ExtrinsicWaitFor = "inBlock",
 ): Promise<ContractPromise> {
   const artifact = loadContractArtifact("vault");
@@ -149,7 +152,52 @@ export async function deployVault(
     artifact.abi,
     artifact.wasm,
     "new",
-    [tokenCodeHash, auctionCodeHash, oracleCodeHash],
+    [treasuryAddress, tokenCodeHash, auctionCodeHash, oracleCodeHash, netuid],
+    waitFor,
+  );
+
+  return getContractInstance(api, artifact, deployed.address);
+}
+
+export async function deployTreasury(
+  api: ApiPromise,
+  signer: KeyringPair,
+  tokenAddress: string,
+  waitFor: ExtrinsicWaitFor = "inBlock",
+): Promise<ContractPromise> {
+  const artifact = loadContractArtifact("treasury");
+  const deployed = await instantiateContract(
+    api,
+    signer,
+    artifact.abi,
+    artifact.wasm,
+    "new",
+    [tokenAddress],
+    waitFor,
+  );
+
+  return getContractInstance(api, artifact, deployed.address);
+}
+
+export async function deployGovernance(
+  api: ApiPromise,
+  signer: KeyringPair,
+  treasuryAddress: string,
+  vaultAddress: string,
+  auctionAddress: string,
+  oracleAddress: string,
+  maintainer: string,
+  electionCodeHash: string,
+  waitFor: ExtrinsicWaitFor = "inBlock",
+): Promise<ContractPromise> {
+  const artifact = loadContractArtifact("governance");
+  const deployed = await instantiateContract(
+    api,
+    signer,
+    artifact.abi,
+    artifact.wasm,
+    "new",
+    [treasuryAddress, vaultAddress, auctionAddress, oracleAddress, maintainer, electionCodeHash],
     waitFor,
   );
 

@@ -46,22 +46,38 @@ async function main(): Promise<void> {
         getOptionalEnv("VAULT_ORACLE_CODE_HASH"),
       "VAULT_ORACLE_CODE_HASH / --oracle-code-hash",
     );
+    const treasuryAddress = requireValue(
+      getCliFlag("--treasury-address") ??
+        getOptionalEnv("VAULT_TREASURY_ADDRESS"),
+      "VAULT_TREASURY_ADDRESS / --treasury-address",
+    );
+    const netuid = Number(
+      requireValue(
+        getCliFlag("--netuid") ??
+          getOptionalEnv("VAULT_NETUID"),
+        "VAULT_NETUID / --netuid",
+      ),
+    );
 
     const contract = await deployVault(
       api,
       contractDeployer,
+      treasuryAddress,
       tokenCodeHash,
       auctionCodeHash,
       oracleCodeHash,
+      netuid,
     );
 
     console.log(
       stringifyJson({
         address: contract.address.toString(),
         deployerAddress: contractDeployer.address,
+        treasuryAddress,
         tokenCodeHash,
         auctionCodeHash,
         oracleCodeHash,
+        netuid,
       }),
     );
   } finally {

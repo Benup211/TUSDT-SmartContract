@@ -42,6 +42,7 @@ cargo contract build --manifest-path contracts/tusdt-oracle/Cargo.toml --release
 cargo contract build --manifest-path contracts/tusdt-vault/Cargo.toml --release
 cargo contract build --manifest-path contracts/tusdt-treasury/Cargo.toml --release
 cargo contract build --manifest-path contracts/tusdt-governance/Cargo.toml --release
+cargo contract build --manifest-path contracts/tusdt-election/Cargo.toml --release
 ```
 
 Artifacts are produced in `target/ink/`.
