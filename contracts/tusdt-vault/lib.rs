@@ -363,6 +363,7 @@ mod vault {
             token_code_hash: Hash,
             auction_code_hash: Hash,
             oracle_code_hash: Hash,
+            netuid: u16,
         ) -> Self {
             let governance = Self::env().caller();
 
@@ -377,7 +378,7 @@ mod vault {
                 .endowment(0)
                 .salt_bytes([1; 32])
                 .instantiate();
-            let oracle = TusdtOracleRef::new(contract_account, governance)
+            let oracle = TusdtOracleRef::new(contract_account, governance, netuid)
                 .code_hash(oracle_code_hash)
                 .endowment(0)
                 .salt_bytes([2; 32])

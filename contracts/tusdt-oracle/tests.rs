@@ -1,5 +1,10 @@
 use super::oracle::*;
+use tusdt_env::StakeInfo;
 use tusdt_primitives::Ratio;
+
+// ---------------------------------------------------------------------------
+// Test helpers
+// ---------------------------------------------------------------------------
 
 fn set_caller(caller: ink::primitives::AccountId) {
     let callee = ink::env::account_id::<tusdt_env::CustomEnvironment>();
@@ -17,19 +22,28 @@ fn account_from_seed(seed: u32) -> ink::primitives::AccountId {
     ink::primitives::AccountId::from(bytes)
 }
 
+fn metadata_for(reporter: ink::primitives::AccountId) -> PriceSubmissionMetadata {
+    PriceSubmissionMetadata {
+        hot_key: reporter,
+        provider: None,
+    }
+}
+
+/// Helper: submit a price with default metadata (hot_key = caller, no provider).
 fn submit_price(oracle: &mut TusdtOracle, reporter: ink::primitives::AccountId, price: u128) {
     set_caller(reporter);
     assert_eq!(
-        oracle.submit_price(Ratio::from_integer(price), None),
+        oracle.submit_price(Ratio::from_integer(price), metadata_for(reporter)),
         Ok(())
     );
 }
 
+/// Helper: submit a price with custom metadata.
 fn submit_price_with_metadata(
     oracle: &mut TusdtOracle,
     reporter: ink::primitives::AccountId,
     price: u128,
-    metadata: Option<PriceSubmissionMetadata>,
+    metadata: PriceSubmissionMetadata,
 ) {
     set_caller(reporter);
     assert_eq!(
@@ -38,16 +52,83 @@ fn submit_price_with_metadata(
     );
 }
 
+// ---------------------------------------------------------------------------
+// Chain-extension mock (same pattern as governance/election tests)
+// ---------------------------------------------------------------------------
+
+struct StakeExtension {
+    stake: Option<u64>,
+    is_registered: bool,
+    should_fail: bool,
+}
+
+impl ink::env::test::ChainExtension for StakeExtension {
+    fn ext_id(&self) -> u16 {
+        0x1000
+    }
+
+    fn call(&mut self, _func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
+        if self.should_fail {
+            return 1; // ReadFailed
+        }
+        let info = self.stake.map(|stake| StakeInfo {
+            hotkey: ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>().alice,
+            coldkey: ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>().alice,
+            netuid: ink::scale::Compact(113),
+            stake: ink::scale::Compact(stake),
+            locked: ink::scale::Compact(0),
+            emission: ink::scale::Compact(0),
+            tao_emission: ink::scale::Compact(0),
+            drain: ink::scale::Compact(0),
+            is_registered: self.is_registered,
+        });
+        ink::scale::Encode::encode_to(&info, output);
+        0
+    }
+}
+
+/// Register a mock that reports a registered neuron with stake.
+fn register_stake(registered: bool) {
+    ink::env::test::register_chain_extension(StakeExtension {
+        stake: Some(1_000_000),
+        is_registered: registered,
+        should_fail: false,
+    });
+}
+
+/// Register a mock that returns no stake record at all.
+fn register_no_stake() {
+    ink::env::test::register_chain_extension(StakeExtension {
+        stake: None,
+        is_registered: false,
+        should_fail: false,
+    });
+}
+
+/// Register a mock that simulates a chain-extension error (status code 1).
+fn register_failing_extension() {
+    ink::env::test::register_chain_extension(StakeExtension {
+        stake: None,
+        is_registered: false,
+        should_fail: true,
+    });
+}
+
+// ========================================================================
+// Existing tests — updated for subnet-based authorization
+// ========================================================================
+
 #[ink::test]
-fn reporter_whitelist_is_enforced() {
+fn subnet_registration_is_required() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
+    register_no_stake();
     set_caller(accounts.bob);
     assert_eq!(
-        oracle.submit_price(Ratio::from_integer(10), None),
-        Err(Error::NotReporter)
+        oracle.submit_price(Ratio::from_integer(10), metadata_for(accounts.bob)),
+        Err(Error::NotRegisteredInSubnet)
     );
 }
 
@@ -55,12 +136,12 @@ fn reporter_whitelist_is_enforced() {
 fn zero_price_is_rejected() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
+    register_stake(true);
     set_caller(accounts.bob);
     assert_eq!(
-        oracle.submit_price(Ratio::from_integer(0), None),
+        oracle.submit_price(Ratio::from_integer(0), metadata_for(accounts.bob)),
         Err(Error::InvalidPrice)
     );
 }
@@ -69,14 +150,15 @@ fn zero_price_is_rejected() {
 fn reporter_resubmission_replaces_previous_value() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.charlie, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.django, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 10);
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 12);
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 13);
+    register_stake(true);
     submit_price(&mut oracle, accounts.django, 14);
 
     assert_eq!(
@@ -93,17 +175,17 @@ fn reporter_resubmission_replaces_previous_value() {
             PriceSubmission {
                 reporter: accounts.bob,
                 price: Ratio::from_integer(12),
-                metadata: None,
+                metadata: metadata_for(accounts.bob),
             },
             PriceSubmission {
                 reporter: accounts.charlie,
                 price: Ratio::from_integer(13),
-                metadata: None,
+                metadata: metadata_for(accounts.charlie),
             },
             PriceSubmission {
                 reporter: accounts.django,
                 price: Ratio::from_integer(14),
-                metadata: None,
+                metadata: metadata_for(accounts.django),
             },
         ]
     );
@@ -113,12 +195,12 @@ fn reporter_resubmission_replaces_previous_value() {
 fn commit_is_blocked_below_quorum() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.charlie, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.django)), Ok(()));
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 10);
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 20);
 
     set_caller(accounts.django);
@@ -129,7 +211,7 @@ fn commit_is_blocked_below_quorum() {
 fn override_allows_commit_without_submissions() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_time(55);
@@ -157,10 +239,10 @@ fn override_allows_commit_without_submissions() {
 fn override_bypasses_quorum_and_keeps_available_median() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.charlie)), Ok(()));
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 10);
 
     set_time(88);
@@ -186,14 +268,14 @@ fn override_bypasses_quorum_and_keeps_available_median() {
 fn median_is_used_for_three_submissions() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.charlie, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.django, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.eve)), Ok(()));
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 30);
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 10);
+    register_stake(true);
     submit_price(&mut oracle, accounts.django, 20);
 
     set_time(77);
@@ -216,7 +298,9 @@ fn median_is_used_for_three_submissions() {
 fn median_is_used_for_five_submissions() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    register_stake(true);
     for reporter in [
         accounts.bob,
         accounts.charlie,
@@ -224,14 +308,15 @@ fn median_is_used_for_five_submissions() {
         accounts.eve,
         accounts.frank,
     ] {
-        assert_eq!(oracle.set_reporter(reporter, true), Ok(()));
+        submit_price(&mut oracle, reporter, match reporter {
+            r if r == accounts.bob => 50,
+            r if r == accounts.charlie => 10,
+            r if r == accounts.django => 30,
+            r if r == accounts.eve => 20,
+            r if r == accounts.frank => 40,
+            _ => 0,
+        });
     }
-
-    submit_price(&mut oracle, accounts.bob, 50);
-    submit_price(&mut oracle, accounts.charlie, 10);
-    submit_price(&mut oracle, accounts.django, 30);
-    submit_price(&mut oracle, accounts.eve, 20);
-    submit_price(&mut oracle, accounts.frank, 40);
 
     assert_eq!(
         oracle.get_current_round_summary(),
@@ -247,20 +332,16 @@ fn median_is_used_for_five_submissions() {
 fn median_is_averaged_for_four_submissions() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    for reporter in [
-        accounts.bob,
-        accounts.charlie,
-        accounts.django,
-        accounts.eve,
-    ] {
-        assert_eq!(oracle.set_reporter(reporter, true), Ok(()));
-    }
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.frank)), Ok(()));
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 40);
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 10);
+    register_stake(true);
     submit_price(&mut oracle, accounts.django, 30);
+    register_stake(true);
     submit_price(&mut oracle, accounts.eve, 20);
 
     assert_eq!(
@@ -292,14 +373,14 @@ fn median_is_averaged_for_four_submissions() {
 fn manual_override_is_stored_while_preserving_median_metadata() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.charlie, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.django, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.eve)), Ok(()));
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 10);
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 20);
+    register_stake(true);
     submit_price(&mut oracle, accounts.django, 30);
 
     set_time(99);
@@ -326,14 +407,14 @@ fn manual_override_is_stored_while_preserving_median_metadata() {
 fn commit_advances_the_round() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.charlie, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.django, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.eve)), Ok(()));
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 10);
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 20);
+    register_stake(true);
     submit_price(&mut oracle, accounts.django, 30);
 
     set_caller(accounts.eve);
@@ -351,15 +432,13 @@ fn commit_advances_the_round() {
 }
 
 #[ink::test]
-fn governance_sets_validator_and_reporters() {
+fn governance_sets_validator() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.bob);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.bob);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.bob, 113);
 
     assert_eq!(oracle.set_validator(Some(accounts.charlie)), Ok(()));
     assert_eq!(oracle.validator(), Some(accounts.charlie));
-    assert_eq!(oracle.set_reporter(accounts.django, true), Ok(()));
-    assert!(oracle.is_reporter(accounts.django));
 
     set_caller(accounts.eve);
     assert_eq!(
@@ -372,7 +451,7 @@ fn governance_sets_validator_and_reporters() {
 fn controller_updates_oracle_governance() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.bob);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.bob, 113);
 
     set_caller(accounts.bob);
     assert_eq!(
@@ -384,21 +463,25 @@ fn controller_updates_oracle_governance() {
     assert_eq!(oracle.update_governance(accounts.charlie), Ok(()));
     assert_eq!(oracle.governance(), accounts.charlie);
 
+    // Verify the old governance can no longer act.
     set_caller(accounts.bob);
     assert_eq!(
-        oracle.set_reporter(accounts.django, true),
+        oracle.set_max_price_deviation(Ratio::from_basis_points(1_000)),
         Err(Error::NotGovernance)
     );
 
     set_caller(accounts.charlie);
-    assert_eq!(oracle.set_reporter(accounts.django, true), Ok(()));
+    assert_eq!(
+        oracle.set_max_price_deviation(Ratio::from_basis_points(1_000)),
+        Ok(())
+    );
 }
 
 #[ink::test]
 fn committed_round_history_is_queryable() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     set_time(10);
     let round_0 = oracle
@@ -421,7 +504,7 @@ fn committed_round_history_is_queryable() {
 fn committed_round_history_supports_pagination() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     for round_id in 0..12_u32 {
         set_time(round_id as u64);
@@ -449,18 +532,19 @@ fn committed_round_history_supports_pagination() {
 fn round_submissions_include_metadata() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.charlie, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
+    register_stake(true);
     submit_price_with_metadata(
         &mut oracle,
         accounts.bob,
         12,
-        Some(PriceSubmissionMetadata {
+        PriceSubmissionMetadata {
             hot_key: accounts.eve,
-        }),
+            provider: None,
+        },
     );
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 15);
 
     assert_eq!(
@@ -469,14 +553,15 @@ fn round_submissions_include_metadata() {
             PriceSubmission {
                 reporter: accounts.bob,
                 price: Ratio::from_integer(12),
-                metadata: Some(PriceSubmissionMetadata {
+                metadata: PriceSubmissionMetadata {
                     hot_key: accounts.eve,
-                }),
+                    provider: None,
+                },
             },
             PriceSubmission {
                 reporter: accounts.charlie,
                 price: Ratio::from_integer(15),
-                metadata: None,
+                metadata: metadata_for(accounts.charlie),
             },
         ]
     );
@@ -486,22 +571,23 @@ fn round_submissions_include_metadata() {
 fn round_submission_count_is_bounded() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     let max_submissions = oracle.max_round_submissions();
     for seed in 0..max_submissions {
         let reporter = account_from_seed(seed + 1);
-        set_caller(accounts.alice);
-        assert_eq!(oracle.set_reporter(reporter, true), Ok(()));
+        register_stake(true);
         submit_price(&mut oracle, reporter, seed as u128 + 1);
     }
 
     let overflow_reporter = account_from_seed(max_submissions + 1);
-    set_caller(accounts.alice);
-    assert_eq!(oracle.set_reporter(overflow_reporter, true), Ok(()));
+    register_stake(true);
     set_caller(overflow_reporter);
     assert_eq!(
-        oracle.submit_price(Ratio::from_integer(999), None),
+        oracle.submit_price(
+            Ratio::from_integer(999),
+            metadata_for(overflow_reporter)
+        ),
         Err(Error::MaxSubmissionsReached)
     );
 
@@ -519,7 +605,7 @@ fn round_submission_count_is_bounded() {
 fn first_commit_skips_deviation_check() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
@@ -530,7 +616,7 @@ fn first_commit_skips_deviation_check() {
 fn validator_commit_within_deviation_succeeds() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
@@ -545,7 +631,7 @@ fn validator_commit_within_deviation_succeeds() {
 fn validator_commit_outside_deviation_is_rejected() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
@@ -562,10 +648,7 @@ fn validator_commit_outside_deviation_is_rejected() {
 fn median_commit_outside_deviation_is_rejected() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
-    assert_eq!(oracle.set_reporter(accounts.bob, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.charlie, true), Ok(()));
-    assert_eq!(oracle.set_reporter(accounts.django, true), Ok(()));
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.eve)), Ok(()));
 
     set_caller(accounts.eve);
@@ -573,8 +656,11 @@ fn median_commit_outside_deviation_is_rejected() {
         .commit_round(Some(Ratio::from_integer(100)))
         .expect("first commit should succeed");
 
+    register_stake(true);
     submit_price(&mut oracle, accounts.bob, 200);
+    register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 210);
+    register_stake(true);
     submit_price(&mut oracle, accounts.django, 220);
 
     set_caller(accounts.eve);
@@ -588,7 +674,7 @@ fn median_commit_outside_deviation_is_rejected() {
 fn governance_commit_bypasses_deviation_and_quorum() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
@@ -615,7 +701,7 @@ fn governance_commit_bypasses_deviation_and_quorum() {
 fn governance_commit_rejects_zero_price() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     assert_eq!(
         oracle.commit_round_governance(Ratio::from_integer(0)),
@@ -627,7 +713,7 @@ fn governance_commit_rejects_zero_price() {
 fn governance_commit_requires_governance_caller() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     set_caller(accounts.bob);
     assert_eq!(
@@ -640,7 +726,7 @@ fn governance_commit_requires_governance_caller() {
 fn governance_can_widen_deviation_threshold() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
@@ -671,11 +757,132 @@ fn governance_can_widen_deviation_threshold() {
 fn set_max_price_deviation_requires_governance() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     set_caller(accounts.bob);
     assert_eq!(
         oracle.set_max_price_deviation(Ratio::from_basis_points(1_000)),
         Err(Error::NotGovernance)
     );
+}
+
+// ========================================================================
+// New tests — subnet-based authorization
+// ========================================================================
+
+#[ink::test]
+fn invalid_hotkey_rejected() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    register_stake(true);
+    let zero_hotkey = ink::primitives::AccountId::from([0u8; 32]);
+    set_caller(accounts.bob);
+    assert_eq!(
+        oracle.submit_price(
+            Ratio::from_integer(10),
+            PriceSubmissionMetadata {
+                hot_key: zero_hotkey,
+                provider: None,
+            }
+        ),
+        Err(Error::InvalidHotkey)
+    );
+}
+
+#[ink::test]
+fn not_registered_in_subnet_rejected() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    // Mock reports stake exists but is_registered = false.
+    register_stake(false);
+    set_caller(accounts.bob);
+    assert_eq!(
+        oracle.submit_price(Ratio::from_integer(10), metadata_for(accounts.bob)),
+        Err(Error::NotRegisteredInSubnet)
+    );
+}
+
+#[ink::test]
+fn no_stake_record_rejected() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    // Mock returns None (no stake record at all).
+    register_no_stake();
+    set_caller(accounts.bob);
+    assert_eq!(
+        oracle.submit_price(Ratio::from_integer(10), metadata_for(accounts.bob)),
+        Err(Error::NotRegisteredInSubnet)
+    );
+}
+
+#[ink::test]
+fn chain_extension_failure_rejected() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    register_failing_extension();
+    set_caller(accounts.bob);
+    assert_eq!(
+        oracle.submit_price(Ratio::from_integer(10), metadata_for(accounts.bob)),
+        Err(Error::ChainExtensionFailed)
+    );
+}
+
+#[ink::test]
+fn provider_field_persisted() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    register_stake(true);
+    let metadata = PriceSubmissionMetadata {
+        hot_key: accounts.bob,
+        provider: Some(b"coingecko".to_vec()),
+    };
+    submit_price_with_metadata(&mut oracle, accounts.bob, 100, metadata);
+
+    let submissions = oracle.get_round_submissions(0);
+    assert_eq!(submissions.len(), 1);
+    assert_eq!(submissions[0].reporter, accounts.bob);
+    assert_eq!(submissions[0].price, Ratio::from_integer(100));
+    assert_eq!(submissions[0].metadata.hot_key, accounts.bob);
+    assert_eq!(
+        submissions[0].metadata.provider,
+        Some(b"coingecko".to_vec())
+    );
+}
+
+#[ink::test]
+fn set_netuid_and_get_netuid() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 199);
+
+    assert_eq!(oracle.get_netuid(), 199);
+
+    // Governance can change it.
+    assert_eq!(oracle.set_netuid(42), Ok(()));
+    assert_eq!(oracle.get_netuid(), 42);
+}
+
+#[ink::test]
+fn set_netuid_requires_governance() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.bob, 113);
+
+    // alice is the controller, not governance; bob is governance.
+    set_caller(accounts.alice);
+    assert_eq!(oracle.set_netuid(42), Err(Error::NotGovernance));
+
+    // bob (governance) can set it.
+    set_caller(accounts.bob);
+    assert_eq!(oracle.set_netuid(42), Ok(()));
 }

@@ -85,6 +85,13 @@ impl TusdtGovernance {
             .map_err(|_| Error::OracleCallFailed)
     }
 
+    pub(crate) fn forward_oracle_set_netuid(&mut self, netuid: u16) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.oracle
+            .set_netuid(netuid)
+            .map_err(|_| Error::OracleCallFailed)
+    }
+
     // ----- Auction: maintainer-gated (config) -----
 
     pub(crate) fn forward_auction_set_admin(&mut self, admin: Option<AccountId>) -> Result<()> {

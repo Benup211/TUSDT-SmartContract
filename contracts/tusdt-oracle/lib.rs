@@ -28,22 +28,24 @@ mod oracle {
         pub was_overridden: bool,
     }
 
-    /// Optional metadata attached to a reporter's submission (e.g. originating hotkey).
-    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    /// Metadata attached to a reporter's submission, including the originating hotkey
+    /// and an optional provider identifier (e.g. "coinmarketcap", "coingecko").
+    #[derive(Debug, Clone, PartialEq, Eq)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct PriceSubmissionMetadata {
         pub hot_key: AccountId,
+        pub provider: Option<Vec<u8>>,
     }
 
     /// A single reporter's price submission for an open round.
-    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    #[derive(Debug, Clone, PartialEq, Eq)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct PriceSubmission {
         pub reporter: AccountId,
         pub price: Ratio,
-        pub metadata: Option<PriceSubmissionMetadata>,
+        pub metadata: PriceSubmissionMetadata,
     }
 
     /// Lightweight summary of a round used by view callers.
@@ -61,9 +63,10 @@ mod oracle {
     pub struct TusdtOracle {
         controller: AccountId,
         governance: AccountId,
+        /// The Bittensor subnet (netuid) whose registered neurons may submit prices.
+        netuid: u16,
 
         validator: Option<AccountId>,
-        reporters: Mapping<AccountId, bool>,
 
         current_round_id: u32,
         round_submissions: Mapping<(u32, AccountId), PriceSubmission>,
@@ -74,14 +77,6 @@ mod oracle {
         max_price_deviation: Ratio,
     }
 
-    /// Emitted when a reporter is enabled or disabled.
-    #[ink(event)]
-    pub struct ReporterUpdated {
-        #[ink(topic)]
-        reporter: AccountId,
-        enabled: bool,
-    }
-
     /// Emitted when a reporter submits (or replaces) a price for the current round.
     #[ink(event)]
     pub struct PriceSubmitted {
@@ -90,7 +85,7 @@ mod oracle {
         #[ink(topic)]
         reporter: AccountId,
         price: Ratio,
-        metadata: Option<PriceSubmissionMetadata>,
+        metadata: PriceSubmissionMetadata,
         replaced_existing: bool,
     }
 
@@ -127,6 +122,12 @@ mod oracle {
         max_price_deviation: Ratio,
     }
 
+    /// Emitted when the governing subnet netuid is updated.
+    #[ink(event)]
+    pub struct NetuidUpdated {
+        netuid: u16,
+    }
+
     /// Errors returned by the oracle contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
@@ -137,8 +138,12 @@ mod oracle {
         NotGovernance,
         /// Caller is not the configured validator.
         NotValidator,
-        /// Caller is not an authorized reporter.
-        NotReporter,
+        /// The supplied hotkey is invalid (e.g. a zero address).
+        InvalidHotkey,
+        /// The caller's (coldkey, hotkey) pair is not registered in the governing subnet.
+        NotRegisteredInSubnet,
+        /// Chain extension call failed at the node level.
+        ChainExtensionFailed,
         /// Submitted or overridden price was zero / invalid.
         InvalidPrice,
         /// Round has fewer than `MIN_REPORTERS` submissions for a non-override commit.
@@ -156,14 +161,15 @@ mod oracle {
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtOracle {
-        /// Initializes the oracle contract with controller and governance accounts.
+        /// Initializes the oracle contract with controller, governance accounts, and the
+        /// Bittensor subnet netuid whose registered neurons are authorized to submit prices.
         #[ink(constructor)]
-        pub fn new(controller: AccountId, governance: AccountId) -> Self {
+        pub fn new(controller: AccountId, governance: AccountId, netuid: u16) -> Self {
             Self {
                 controller,
                 governance,
+                netuid,
                 validator: None,
-                reporters: Mapping::default(),
                 current_round_id: 0,
                 round_submissions: Mapping::default(),
                 round_reporter_count: Mapping::default(),
@@ -176,30 +182,50 @@ mod oracle {
             }
         }
 
-        /// Submits or replaces the caller's price for the current round, optionally attaching metadata.
+        /// Submits or replaces the caller's price for the current round. The caller (coldkey)
+        /// must supply metadata containing the hotkey of a neuron registered in the governing
+        /// subnet. Authorization is verified via the chain extension.
         #[ink(message)]
         pub fn submit_price(
             &mut self,
             price: Ratio,
-            metadata: Option<PriceSubmissionMetadata>,
+            metadata: PriceSubmissionMetadata,
         ) -> Result<()> {
-            let reporter = self.env().caller();
-            if !self.is_reporter(reporter) {
-                return Err(Error::NotReporter);
+            let coldkey = self.env().caller();
+            let hotkey = metadata.hot_key;
+
+            // Reject a zero-address hotkey with a clear error.
+            let zero_account = AccountId::from([0u8; 32]);
+            if hotkey == zero_account {
+                return Err(Error::InvalidHotkey);
             }
+
+            // Dynamic authorization via subnet chain extension: the (coldkey, hotkey, netuid)
+            // triplet must have a stake record and the hotkey must be registered.
+            let info = self
+                .env()
+                .extension()
+                .get_stake_info_for_hotkey_coldkey_netuid(hotkey, coldkey, self.netuid)
+                .map_err(|_| Error::ChainExtensionFailed)?
+                .ok_or(Error::NotRegisteredInSubnet)?;
+
+            if !info.is_registered {
+                return Err(Error::NotRegisteredInSubnet);
+            }
+
             if price.is_zero() {
                 return Err(Error::InvalidPrice);
             }
 
             let round_id = self.current_round_id;
-            let replaced_existing = self.round_submissions.get((round_id, reporter)).is_some();
+            let replaced_existing = self.round_submissions.get((round_id, coldkey)).is_some();
             if !replaced_existing {
                 let reporter_count = self.round_reporter_count.get(round_id).unwrap_or(0);
                 if reporter_count >= MAX_ROUND_SUBMISSIONS {
                     return Err(Error::MaxSubmissionsReached);
                 }
                 self.round_reporters
-                    .insert((round_id, reporter_count), &reporter);
+                    .insert((round_id, reporter_count), &coldkey);
                 self.round_reporter_count.insert(
                     round_id,
                     &reporter_count
@@ -209,17 +235,17 @@ mod oracle {
             }
 
             self.round_submissions.insert(
-                (round_id, reporter),
+                (round_id, coldkey),
                 &PriceSubmission {
-                    reporter,
+                    reporter: coldkey,
                     price,
-                    metadata,
+                    metadata: metadata.clone(),
                 },
             );
 
             self.env().emit_event(PriceSubmitted {
                 round_id,
-                reporter,
+                reporter: coldkey,
                 price,
                 metadata,
                 replaced_existing,
@@ -271,12 +297,12 @@ mod oracle {
             self.finalize_round(round_id, price, median_price, reporter_count, true)
         }
 
-        /// Enables or disables a reporter account.
+        /// Updates the governing subnet netuid. Only governance may call this.
         #[ink(message)]
-        pub fn set_reporter(&mut self, reporter: AccountId, enabled: bool) -> Result<()> {
-            self.ensure_validator()?;
-            self.reporters.insert(reporter, &enabled);
-            self.env().emit_event(ReporterUpdated { reporter, enabled });
+        pub fn set_netuid(&mut self, netuid: u16) -> Result<()> {
+            self.ensure_governance()?;
+            self.netuid = netuid;
+            self.env().emit_event(NetuidUpdated { netuid });
             Ok(())
         }
 
@@ -392,12 +418,6 @@ mod oracle {
             }
         }
 
-        /// Returns whether the provided account is currently authorized as a reporter.
-        #[ink(message)]
-        pub fn is_reporter(&self, account: AccountId) -> bool {
-            self.reporters.get(account).unwrap_or(false)
-        }
-
         /// Returns the controller account ID.
         #[ink(message)]
         pub fn controller(&self) -> AccountId {
@@ -432,6 +452,12 @@ mod oracle {
         #[ink(message)]
         pub fn max_price_deviation(&self) -> Ratio {
             self.max_price_deviation
+        }
+
+        /// Returns the governing subnet netuid.
+        #[ink(message)]
+        pub fn get_netuid(&self) -> u16 {
+            self.netuid
         }
 
         /// Reverts with `NotController` if caller is not the controller (vault) account.
