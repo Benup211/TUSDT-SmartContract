@@ -14,6 +14,8 @@ mod oracle {
     const PAGE_SIZE: u32 = 10;
     const MAX_ROUND_SUBMISSIONS: u32 = 256;
     const DEFAULT_MAX_PRICE_DEVIATION_BASIS_POINTS: u32 = 2_000;
+    /// Minimum subnet alpha stake required to submit a price (default 1e12, matching governance).
+    const DEFAULT_MIN_SUBMITTER_STAKE: u128 = 1_000_000_000_000;
 
     /// Snapshot of a committed oracle round, including its final price and source median.
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -65,6 +67,8 @@ mod oracle {
         governance: AccountId,
         /// The Bittensor subnet (netuid) whose registered neurons may submit prices.
         netuid: u16,
+        /// Minimum subnet alpha stake required to submit a price.
+        min_submitter_stake: u128,
 
         validator: Option<AccountId>,
 
@@ -128,6 +132,12 @@ mod oracle {
         netuid: u16,
     }
 
+    /// Emitted when the minimum required submitter stake is changed.
+    #[ink(event)]
+    pub struct MinSubmitterStakeUpdated {
+        min_submitter_stake: u128,
+    }
+
     /// Errors returned by the oracle contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
@@ -142,6 +152,8 @@ mod oracle {
         InvalidHotkey,
         /// The caller's (coldkey, hotkey) pair is not registered in the governing subnet.
         NotRegisteredInSubnet,
+        /// The caller's subnet alpha stake is below the required minimum.
+        InsufficientStake,
         /// Chain extension call failed at the node level.
         ChainExtensionFailed,
         /// Submitted or overridden price was zero / invalid.
@@ -169,6 +181,7 @@ mod oracle {
                 controller,
                 governance,
                 netuid,
+                min_submitter_stake: DEFAULT_MIN_SUBMITTER_STAKE,
                 validator: None,
                 current_round_id: 0,
                 round_submissions: Mapping::default(),
@@ -211,6 +224,12 @@ mod oracle {
 
             if !info.is_registered {
                 return Err(Error::NotRegisteredInSubnet);
+            }
+
+            // Verify the caller's subnet alpha stake meets the minimum threshold.
+            let stake = info.stake.0 as u128;
+            if stake <= self.min_submitter_stake {
+                return Err(Error::InsufficientStake);
             }
 
             if price.is_zero() {
@@ -303,6 +322,17 @@ mod oracle {
             self.ensure_governance()?;
             self.netuid = netuid;
             self.env().emit_event(NetuidUpdated { netuid });
+            Ok(())
+        }
+
+        /// Updates the minimum subnet alpha stake required to submit a price. Governance-only.
+        #[ink(message)]
+        pub fn set_min_submitter_stake(&mut self, min_stake: u128) -> Result<()> {
+            self.ensure_governance()?;
+            self.min_submitter_stake = min_stake;
+            self.env().emit_event(MinSubmitterStakeUpdated {
+                min_submitter_stake: min_stake,
+            });
             Ok(())
         }
 
@@ -458,6 +488,12 @@ mod oracle {
         #[ink(message)]
         pub fn get_netuid(&self) -> u16 {
             self.netuid
+        }
+
+        /// Returns the minimum subnet alpha stake required to submit a price.
+        #[ink(message)]
+        pub fn min_submitter_stake(&self) -> u128 {
+            self.min_submitter_stake
         }
 
         /// Reverts with `NotController` if caller is not the controller (vault) account.

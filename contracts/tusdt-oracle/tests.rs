@@ -87,11 +87,23 @@ impl ink::env::test::ChainExtension for StakeExtension {
     }
 }
 
-/// Register a mock that reports a registered neuron with stake.
+/// Default stake returned by the mock, above the 1e12 minimum threshold.
+const MOCK_STAKE_ABOVE_THRESHOLD: u64 = 2_000_000_000_000;
+
+/// Register a mock that reports a registered neuron with stake above the minimum.
 fn register_stake(registered: bool) {
     ink::env::test::register_chain_extension(StakeExtension {
-        stake: Some(1_000_000),
+        stake: Some(MOCK_STAKE_ABOVE_THRESHOLD),
         is_registered: registered,
+        should_fail: false,
+    });
+}
+
+/// Register a mock that returns a registered neuron but with stake below the minimum.
+fn register_low_stake() {
+    ink::env::test::register_chain_extension(StakeExtension {
+        stake: Some(1),
+        is_registered: true,
         should_fail: false,
     });
 }
@@ -885,4 +897,50 @@ fn set_netuid_requires_governance() {
     // bob (governance) can set it.
     set_caller(accounts.bob);
     assert_eq!(oracle.set_netuid(42), Ok(()));
+}
+
+#[ink::test]
+fn insufficient_stake_rejected() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    register_low_stake();
+    set_caller(accounts.bob);
+    assert_eq!(
+        oracle.submit_price(Ratio::from_integer(10), metadata_for(accounts.bob)),
+        Err(Error::InsufficientStake)
+    );
+}
+
+#[ink::test]
+fn set_min_submitter_stake_and_get() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
+
+    assert_eq!(
+        oracle.min_submitter_stake(),
+        1_000_000_000_000
+    );
+    assert_eq!(oracle.set_min_submitter_stake(500_000_000_000), Ok(()));
+    assert_eq!(oracle.min_submitter_stake(), 500_000_000_000);
+}
+
+#[ink::test]
+fn set_min_submitter_stake_requires_governance() {
+    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
+    set_caller(accounts.alice);
+    let mut oracle = TusdtOracle::new(accounts.alice, accounts.bob, 113);
+
+    // alice is the controller, not governance; bob is governance.
+    set_caller(accounts.alice);
+    assert_eq!(
+        oracle.set_min_submitter_stake(100),
+        Err(Error::NotGovernance)
+    );
+
+    set_caller(accounts.bob);
+    assert_eq!(oracle.set_min_submitter_stake(100), Ok(()));
+    assert_eq!(oracle.min_submitter_stake(), 100);
 }

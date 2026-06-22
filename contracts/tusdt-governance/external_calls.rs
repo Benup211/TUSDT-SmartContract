@@ -92,6 +92,16 @@ impl TusdtGovernance {
             .map_err(|_| Error::OracleCallFailed)
     }
 
+    pub(crate) fn forward_oracle_set_min_submitter_stake(
+        &mut self,
+        min_stake: u128,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.oracle
+            .set_min_submitter_stake(min_stake)
+            .map_err(|_| Error::OracleCallFailed)
+    }
+
     // ----- Auction: maintainer-gated (config) -----
 
     pub(crate) fn forward_auction_set_admin(&mut self, admin: Option<AccountId>) -> Result<()> {

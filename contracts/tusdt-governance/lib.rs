@@ -498,6 +498,12 @@ mod governance {
             self.forward_oracle_set_netuid(netuid)
         }
 
+        /// Updates the minimum submitter stake threshold for the oracle; maintainer-only.
+        #[ink(message)]
+        pub fn oracle_set_min_submitter_stake(&mut self, min_stake: u128) -> Result<()> {
+            self.forward_oracle_set_min_submitter_stake(min_stake)
+        }
+
         /// Sets/clears the auction admin (allowed to bid on expired no-bid auctions); maintainer-only.
         #[ink(message)]
         pub fn auction_set_admin(&mut self, admin: Option<AccountId>) -> Result<()> {
