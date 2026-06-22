@@ -26,6 +26,18 @@ export const CONTRACT_CONFIGS = {
     artifactPath: resolve(REPO_ROOT, "target/ink/tusdt_vault/tusdt_vault.contract"),
     manifestPath: resolve(REPO_ROOT, "contracts/tusdt-vault/Cargo.toml"),
   },
+  treasury: {
+    artifactPath: resolve(REPO_ROOT, "target/ink/tusdt_treasury/tusdt_treasury.contract"),
+    manifestPath: resolve(REPO_ROOT, "contracts/tusdt-treasury/Cargo.toml"),
+  },
+  governance: {
+    artifactPath: resolve(REPO_ROOT, "target/ink/tusdt_governance/tusdt_governance.contract"),
+    manifestPath: resolve(REPO_ROOT, "contracts/tusdt-governance/Cargo.toml"),
+  },
+  election: {
+    artifactPath: resolve(REPO_ROOT, "target/ink/tusdt_election/tusdt_election.contract"),
+    manifestPath: resolve(REPO_ROOT, "contracts/tusdt-election/Cargo.toml"),
+  },
 } as const;
 
 export type ContractName = keyof typeof CONTRACT_CONFIGS;

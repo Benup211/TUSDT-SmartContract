@@ -36,12 +36,13 @@ export interface OraclePriceData {
 
 export interface OraclePriceSubmissionMetadata {
   hotKey: string;
+  provider?: string | null;
 }
 
 export interface OraclePriceSubmission {
   reporter: string;
   price: string | null;
-  metadata: OraclePriceSubmissionMetadata | null;
+  metadata: OraclePriceSubmissionMetadata;
 }
 
 export function parseCliFlag(name: string): string | undefined {
@@ -62,11 +63,19 @@ export function parseBooleanFlag(value: string | undefined, fallback: boolean): 
   return value.toLowerCase() !== "false";
 }
 
+function encodeMetadata(metadata: OraclePriceSubmissionMetadata): object {
+  return {
+    hot_key: metadata.hotKey,
+    provider: metadata.provider ?? null,
+  };
+}
+
 export async function deployOracle(
   api: ApiPromise,
   signer: KeyringPair,
   controllerAddress = signer.address,
   governanceAddress = signer.address,
+  netuid = 0,
   waitFor: ExtrinsicWaitFor = "inBlock",
 ): Promise<ContractPromise> {
   return deployOracleContract(
@@ -74,6 +83,7 @@ export async function deployOracle(
     signer,
     controllerAddress,
     governanceAddress,
+    netuid,
     waitFor,
   );
 }
@@ -83,14 +93,13 @@ export function getOracleContract(api: ApiPromise, address: string): ContractPro
   return new ContractPromise(api, artifact.abi, address);
 }
 
-export async function setReporter(
+export async function setNetuid(
   api: ApiPromise,
   oracle: ContractPromise,
   signer: KeyringPair,
-  reporter: string,
-  enabled: boolean,
+  netuid: number,
 ) {
-  return txMessage(api, oracle, "set_reporter", signer, [reporter, enabled]);
+  return txMessage(api, oracle, "set_netuid", signer, [netuid]);
 }
 
 export async function setValidator(
@@ -107,17 +116,11 @@ export async function submitPrice(
   oracle: ContractPromise,
   signer: KeyringPair,
   priceInteger: bigint | number | string,
-  metadata?: OraclePriceSubmissionMetadata | null,
+  metadata: OraclePriceSubmissionMetadata,
 ) {
-  const metadataArg =
-    metadata === undefined
-      ? null
-      : metadata === null
-        ? null
-        : { hot_key: metadata.hotKey };
   return txMessage(api, oracle, "submit_price", signer, [
     ratioFromInteger(priceInteger),
-    metadataArg,
+    encodeMetadata(metadata),
   ]);
 }
 
@@ -136,17 +139,11 @@ export async function dryRunSubmitPrice(
   oracle: ContractPromise,
   callerAddress: string,
   priceInteger: bigint | number | string,
-  metadata?: OraclePriceSubmissionMetadata | null,
+  metadata: OraclePriceSubmissionMetadata,
 ) {
-  const metadataArg =
-    metadata === undefined
-      ? null
-      : metadata === null
-        ? null
-        : { hot_key: metadata.hotKey };
   return queryMessage(oracle, "submit_price", callerAddress, [
     ratioFromInteger(priceInteger),
-    metadataArg,
+    encodeMetadata(metadata),
   ]);
 }
 
@@ -172,17 +169,16 @@ export async function queryGovernance(
   return String(result.decoded.value);
 }
 
-export async function queryIsReporter(
+export async function queryNetuid(
   oracle: ContractPromise,
   callerAddress: string,
-  account: string,
-): Promise<boolean> {
-  const result = await queryMessage(oracle, "is_reporter", callerAddress, [account]);
+): Promise<number> {
+  const result = await queryMessage(oracle, "get_netuid", callerAddress);
   if (!result.decoded.ok) {
     throw new Error(formatInkError(result.decoded.error));
   }
 
-  return Boolean(result.decoded.value);
+  return toNumber(result.decoded.value);
 }
 
 export async function queryCurrentRoundId(
@@ -273,14 +269,13 @@ export async function queryRoundSubmissions(
   return (toPrimitive(result.decoded.value) as unknown[]).map((entry) => {
     const submission = toPrimitive(entry);
     const metadataValue = pickProperty(submission, "metadata");
-    const metadata =
-      metadataValue === null || metadataValue === undefined
-        ? null
-        : {
-            hotKey: String(
-              pickProperty(toPrimitive(metadataValue), "hot_key", "hotKey"),
-            ),
-          };
+    const metadataPrimitive = toPrimitive(metadataValue);
+    const metadata: OraclePriceSubmissionMetadata = {
+      hotKey: String(
+        pickProperty(metadataPrimitive, "hot_key", "hotKey"),
+      ),
+      provider: pickProperty(metadataPrimitive, "provider") ?? undefined,
+    };
 
     return {
       reporter: String(pickProperty(submission, "reporter")),
