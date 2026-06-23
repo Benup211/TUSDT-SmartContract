@@ -34,14 +34,14 @@ mod governance {
     /// this many distinct members.
     pub(crate) const COUNCIL_SIZE: usize = 5;
     pub(crate) const DEFAULT_NETUID: u16 = 421;
-    pub(crate) const DEFAULT_VOTING_PERIOD_MS: u64 = 48 * 60 * 60 * 1_000;
+    pub(crate) const DEFAULT_VOTING_PERIOD_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
     pub(crate) const DEFAULT_APPROVAL_BPS: u32 = 5_001;
     /// Default quorum as a fraction of the alpha circulating supply, in basis points (2_000 = 20%).
     pub(crate) const DEFAULT_QUORUM_BPS: u32 = 2_000;
     pub(crate) const DEFAULT_MIN_PROPOSER_STAKE: u128 = 1_000_000_000_000;
     /// Proposals may only be submitted on these days of the month (inclusive), in UTC.
-    pub(crate) const DEFAULT_SUBMISSION_OPEN_DAY: u8 = 5;
-    pub(crate) const DEFAULT_SUBMISSION_CLOSE_DAY: u8 = 25;
+    pub(crate) const DEFAULT_SUBMISSION_OPEN_DAY: u8 = 20;
+    pub(crate) const DEFAULT_SUBMISSION_CLOSE_DAY: u8 = 27;
 
     /// Tunable governance parameters. Updatable by the maintainer.
     #[derive(Debug, Copy, Clone)]
@@ -633,16 +633,17 @@ mod governance {
             Ok(())
         }
 
-        /// Submits a new proposal. The caller is treated as the coldkey; `hotkey` is provided
-        /// explicitly and the pair's subnet alpha stake must exceed
-        /// `params.min_proposer_stake`, configurable via `update_params()`.
+        /// Submits a new proposal. Only council members may submit. Proposals are
+        /// accepted during the configured day-of-month window (UTC, inclusive).
         #[ink(message)]
         pub fn submit_proposal(
             &mut self,
             cid: String,
             kind: ProposalKind,
-            hotkey: AccountId,
         ) -> Result<u64> {
+            // Only council members may submit proposals.
+            self.ensure_council()?;
+
             if cid.is_empty() || cid.len() > MAX_CID_LEN {
                 return Err(Error::InvalidCid);
             }
@@ -667,12 +668,6 @@ mod governance {
             }
 
             let proposer = self.env().caller();
-
-            // Gate submission on the proposer's subnet alpha stake.
-            let stake = self.read_stake_weight(hotkey, proposer)?;
-            if stake <= self.params.min_proposer_stake {
-                return Err(Error::InsufficientStake);
-            }
 
             let id = self
                 .proposal_count
@@ -865,17 +860,6 @@ mod governance {
 
             self.env().emit_event(ProposalExecuted { proposal_id });
             Ok(())
-        }
-
-        /// Calls the chain extension to fetch the (hotkey, coldkey, netuid) raw alpha stake.
-        fn read_stake_weight(&self, hotkey: AccountId, coldkey: AccountId) -> Result<u128> {
-            let info = self
-                .env()
-                .extension()
-                .get_stake_info_for_hotkey_coldkey_netuid(hotkey, coldkey, self.netuid)
-                .map_err(|_| Error::StakeQueryFailed)?
-                .ok_or(Error::NoStake)?;
-            Ok(info.stake.0 as u128)
         }
 
         fn ensure_maintainer(&self) -> Result<()> {
