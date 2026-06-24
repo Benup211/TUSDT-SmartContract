@@ -11,47 +11,8 @@
 use super::governance::*;
 use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
-use tusdt_env::StakeInfo;
 use tusdt_primitives::Ratio;
 use tusdt_treasury::{Fund, TokenKind};
-
-/// Default mocked stake (in base units) returned for the proposer, comfortably above the
-/// default `min_proposer_stake` floor so submission is allowed unless a test overrides it.
-const STAKE_ABOVE_FLOOR: u64 = 2_000_000_000_000;
-
-/// Off-chain mock of the `get_stake_info_for_hotkey_coldkey_netuid` chain extension.
-/// `stake = Some(v)` resolves to a `StakeInfo` with that alpha stake; `None` mimics a pair
-/// with no stake record.
-struct StakeExtension {
-    stake: Option<u64>,
-}
-
-impl ink::env::test::ChainExtension for StakeExtension {
-    fn ext_id(&self) -> u16 {
-        0x1000
-    }
-
-    fn call(&mut self, _func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
-        let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
-        let info = self.stake.map(|stake| StakeInfo {
-            hotkey: accounts.alice,
-            coldkey: accounts.alice,
-            netuid: ink::scale::Compact(113),
-            stake: ink::scale::Compact(stake),
-            locked: ink::scale::Compact(0),
-            emission: ink::scale::Compact(0),
-            tao_emission: ink::scale::Compact(0),
-            drain: ink::scale::Compact(0),
-            is_registered: true,
-        });
-        ink::scale::Encode::encode_to(&info, output);
-        0
-    }
-}
-
-fn register_stake(stake: Option<u64>) {
-    ink::env::test::register_chain_extension(StakeExtension { stake });
-}
 
 const MS_PER_DAY: u64 = 86_400_000;
 
@@ -61,8 +22,8 @@ fn ts_for_day(day: u64) -> u64 {
     (day - 1) * MS_PER_DAY
 }
 
-/// A timestamp comfortably inside the default 5..=25 submission window (the 15th).
-const IN_WINDOW_TS: u64 = 14 * MS_PER_DAY;
+/// A timestamp comfortably inside the 20..=27 submission window (the 23rd).
+const IN_WINDOW_TS: u64 = 22 * MS_PER_DAY;
 
 fn set_block_timestamp(ts: u64) {
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(ts);
@@ -78,8 +39,6 @@ fn set_caller(caller: ink::primitives::AccountId) {
 fn make_governance_no_snapshot() -> TusdtGovernance {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     set_caller(accounts.alice);
-    // Default the proposer's stake above the floor; individual tests can re-register.
-    register_stake(Some(STAKE_ABOVE_FLOOR));
     // Default the clock inside the submission window; individual tests can override.
     set_block_timestamp(IN_WINDOW_TS);
     // Maintainer is alice (the caller). The treasury/vault/auction/oracle/election addresses are
@@ -144,12 +103,12 @@ fn constructor_sets_maintainer_and_defaults() {
     // netuid is a top-level field (bound to the maintainer), not a tunable param.
     assert_eq!(gov.netuid(), 421);
     let p = gov.params();
-    assert_eq!(p.voting_period_ms, 48 * 60 * 60 * 1_000);
+    assert_eq!(p.voting_period_ms, 7 * 24 * 60 * 60 * 1_000);
     assert_eq!(p.approval_bps, 5_001);
     assert_eq!(p.quorum_bps, 2_000);
     assert_eq!(p.min_proposer_stake, 1_000_000_000_000);
-    assert_eq!(p.submission_open_day, 5);
-    assert_eq!(p.submission_close_day, 25);
+    assert_eq!(p.submission_open_day, 20);
+    assert_eq!(p.submission_close_day, 27);
     // No snapshot yet → no epoch, no snapshot record, quorum threshold of zero.
     assert_eq!(gov.current_epoch(), 0);
     assert!(gov.get_snapshot(1).is_none());
@@ -160,7 +119,7 @@ fn constructor_sets_maintainer_and_defaults() {
 fn submit_proposal_rejects_without_snapshot() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance_no_snapshot();
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
+    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding);
     assert_eq!(res, Err(Error::NoSnapshot));
 }
 
@@ -168,7 +127,7 @@ fn submit_proposal_rejects_without_snapshot() {
 fn submit_proposal_rejects_empty_cid() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
-    let res = gov.submit_proposal(String::new(), ProposalKind::NonFunding, accounts.bob);
+    let res = gov.submit_proposal(String::new(), ProposalKind::NonFunding);
     assert!(matches!(res, Err(_)));
 }
 
@@ -177,7 +136,7 @@ fn submit_proposal_rejects_oversized_cid() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
     let long_cid = String::from_utf8(vec![b'a'; 97]).unwrap();
-    let res = gov.submit_proposal(long_cid, ProposalKind::NonFunding, accounts.bob);
+    let res = gov.submit_proposal(long_cid, ProposalKind::NonFunding);
     assert!(matches!(res, Err(_)));
 }
 
@@ -193,7 +152,6 @@ fn submit_proposal_rejects_zero_amount_funding() {
             amount: 0,
             recipient: accounts.bob,
         },
-        accounts.bob,
     );
     assert!(matches!(res, Err(_)));
 }
@@ -206,7 +164,6 @@ fn submit_proposal_happy_path_increments_count() {
         .submit_proposal(
             String::from("bafy-cid-1"),
             ProposalKind::NonFunding,
-            accounts.bob,
         )
         .expect("submit ok");
     assert_eq!(id, 1);
@@ -221,80 +178,22 @@ fn submit_proposal_happy_path_increments_count() {
         .submit_proposal(
             String::from("bafy-cid-2"),
             ProposalKind::NonFunding,
-            accounts.bob,
         )
         .expect("submit ok");
     assert_eq!(id2, 2);
     assert_eq!(gov.proposal_count(), 2);
 }
 
-/// Sets the proposer-stake floor on `gov` to `floor`, leaving other params at their defaults.
-fn set_proposer_stake_floor(gov: &mut TusdtGovernance, floor: u128) {
-    let mut p = GovernanceParams::default_params();
-    p.min_proposer_stake = floor;
-    gov.update_params(p).expect("update ok");
-}
-
 #[ink::test]
-fn submit_proposal_rejects_stake_at_or_below_floor() {
+fn submit_proposal_rejects_non_council() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
-    set_proposer_stake_floor(&mut gov, 1_000);
 
-    // Exactly at the floor is not "greater than", so it must be rejected.
-    register_stake(Some(1_000));
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
-    assert_eq!(res, Err(Error::InsufficientStake));
-
-    // Below the floor is likewise rejected.
-    register_stake(Some(999));
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
-    assert_eq!(res, Err(Error::InsufficientStake));
-
+    // frank is intentionally not in the council.
+    set_caller(accounts.frank);
+    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding);
+    assert_eq!(res, Err(Error::NotCouncil));
     assert_eq!(gov.proposal_count(), 0);
-}
-
-#[ink::test]
-fn submit_proposal_rejects_when_no_stake_record() {
-    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
-    let mut gov = make_governance();
-
-    register_stake(None);
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
-    assert_eq!(res, Err(Error::NoStake));
-    assert_eq!(gov.proposal_count(), 0);
-}
-
-#[ink::test]
-fn submit_proposal_allows_stake_just_above_floor() {
-    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
-    let mut gov = make_governance();
-    set_proposer_stake_floor(&mut gov, 1_000);
-
-    register_stake(Some(1_001));
-    let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
-        .expect("submit ok");
-    assert_eq!(id, 1);
-    assert_eq!(gov.proposal_count(), 1);
-}
-
-#[ink::test]
-fn update_params_changes_proposer_stake_floor() {
-    let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
-    let mut gov = make_governance();
-
-    // A 5k-unit stake is below the default 1e12 floor → rejected.
-    register_stake(Some(5_000));
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
-    assert_eq!(res, Err(Error::InsufficientStake));
-
-    // Lower the floor below that stake and the same submission now succeeds.
-    set_proposer_stake_floor(&mut gov, 1_000);
-    let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
-        .expect("submit ok");
-    assert_eq!(id, 1);
 }
 
 #[ink::test]
@@ -302,9 +201,9 @@ fn submit_proposal_rejects_before_window_opens() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
 
-    // The 4th is before the default open day (5th).
-    set_block_timestamp(ts_for_day(4));
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
+    // The 19th is before the default open day (20th).
+    set_block_timestamp(ts_for_day(19));
+    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding);
     assert_eq!(res, Err(Error::OutsideSubmissionWindow));
     assert_eq!(gov.proposal_count(), 0);
 }
@@ -314,9 +213,9 @@ fn submit_proposal_rejects_after_window_closes() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
 
-    // The 26th is after the default close day (25th).
-    set_block_timestamp(ts_for_day(26));
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
+    // The 28th is after the default close day (27th).
+    set_block_timestamp(ts_for_day(28));
+    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding);
     assert_eq!(res, Err(Error::OutsideSubmissionWindow));
     assert_eq!(gov.proposal_count(), 0);
 }
@@ -326,14 +225,14 @@ fn submit_proposal_allows_on_window_boundaries() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
 
-    // Both the open (5th) and close (25th) days are inclusive.
-    set_block_timestamp(ts_for_day(5));
-    gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
-        .expect("5th accepted");
+    // Both the open (20th) and close (27th) days are inclusive.
+    set_block_timestamp(ts_for_day(20));
+    gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
+        .expect("20th accepted");
 
-    set_block_timestamp(ts_for_day(25));
-    gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
-        .expect("25th accepted");
+    set_block_timestamp(ts_for_day(27));
+    gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
+        .expect("27th accepted");
 
     assert_eq!(gov.proposal_count(), 2);
 }
@@ -364,18 +263,18 @@ fn submit_proposal_respects_updated_window() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
 
-    // Narrow the window to the 10th–12th; the 15th (default clock) now falls outside it.
+    // Narrow the window to the 10th–12th; the 15th now falls outside it.
     let mut p = GovernanceParams::default_params();
     p.submission_open_day = 10;
     p.submission_close_day = 12;
     gov.update_params(p).expect("update ok");
 
     set_block_timestamp(ts_for_day(15));
-    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob);
+    let res = gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding);
     assert_eq!(res, Err(Error::OutsideSubmissionWindow));
 
     set_block_timestamp(ts_for_day(11));
-    gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+    gov.submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .expect("11th accepted");
     assert_eq!(gov.proposal_count(), 1);
 }
@@ -419,7 +318,7 @@ fn vote_weight_is_sqrt_of_balance() {
     let balance = 4_000_000_000_000;
     submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 10_000, 0);
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .expect("submit ok");
 
     gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
@@ -440,7 +339,7 @@ fn vote_weight_applies_time_staked_multiplier() {
     let balance = 4_000_000_000_000;
     submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 8_000, 0);
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .expect("submit ok");
 
     gov.vote(id, accounts.bob, true, balance, 8_000, Vec::new())
@@ -457,7 +356,7 @@ fn vote_rejects_invalid_proof() {
     let balance = 4_000_000_000_000;
     submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 10_000, 0);
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .expect("submit ok");
 
     // A balance that doesn't match the committed leaf can't be proven.
@@ -479,7 +378,7 @@ fn vote_verifies_multi_leaf_proof() {
     gov.submit_snapshot(root, 0, 0).expect("snapshot ok");
 
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .expect("submit ok");
 
     gov.vote(id, accounts.bob, true, balance, 10_000, vec![leaf_other])
@@ -495,7 +394,7 @@ fn vote_rejects_double_vote_for_same_pair() {
     let balance = 4_000_000_000_000;
     submit_single_leaf_snapshot(&mut gov, accounts.alice, accounts.bob, balance, 10_000, 0);
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .expect("submit ok");
 
     gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
@@ -556,7 +455,7 @@ fn finalize_before_voting_ends_fails() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .unwrap();
     assert!(gov.finalize(id).is_err());
 }
@@ -566,7 +465,7 @@ fn execute_on_non_passed_fails() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut gov = make_governance();
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .unwrap();
     // Still Active → cannot execute.
     assert!(gov.execute(id).is_err());
@@ -585,7 +484,7 @@ fn finalize_rejects_when_quorum_not_met() {
     assert_eq!(gov.quorum(epoch), 20);
 
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .unwrap();
 
     // Advance block timestamp past voting_ends_at.
@@ -655,7 +554,7 @@ fn finalize_passes_when_quorum_met() {
     assert!(gov.quorum(epoch) < balance);
 
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .unwrap();
     gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
         .expect("vote ok");
@@ -692,7 +591,7 @@ fn finalize_rejects_when_voted_balance_below_quorum() {
     assert_eq!(gov.quorum(epoch), 20_000_000);
 
     let id = gov
-        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding, accounts.bob)
+        .submit_proposal(String::from("bafy"), ProposalKind::NonFunding)
         .unwrap();
     gov.vote(id, accounts.bob, true, balance, 10_000, Vec::new())
         .expect("vote ok");
