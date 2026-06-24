@@ -15,7 +15,7 @@ mod vault {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 60 * 1_000;
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
 
     mod params {
         include!("params.rs");
@@ -267,14 +267,6 @@ mod vault {
         collateral_sold: Balance,
         transaction_fee: Balance,
         debt_cleared: Balance,
-    }
-
-    /// Emitted when the entire native balance of the contract is drained to abandon the vault, for emergency migration to a new deployment; **TESTNET ONLY**.
-    #[ink(event)]
-    pub struct EmergencyDrained {
-        #[ink(topic)]
-        recipient: AccountId,
-        amount: Balance,
     }
 
     /// Errors returned by the vault contract.
@@ -555,34 +547,6 @@ mod vault {
             });
 
             Ok(())
-        }
-
-        /// **TESTNET ONLY** — Drains the entire native balance of the contract to `recipient`.
-        ///
-        /// Use this before migrating to a new contract deployment when storage layout has
-        /// changed and you need to recover all collateral funds locked in this instance.
-        /// `total_collateral_balance` is zeroed so internal accounting stays consistent.
-        /// Only callable by governance.
-        #[ink(message)]
-        pub fn emergency_drain(&mut self, recipient: AccountId) -> Result<Balance> {
-            self.ensure_governance_or_platform()?;
-
-            let amount = self.env().balance();
-            if amount == 0 {
-                return Ok(0);
-            }
-
-            // Zero out accounting so any stale state cannot be acted on after the drain.
-            self.total_collateral_balance = 0;
-
-            if self.env().transfer(recipient, amount).is_err() {
-                return Err(Error::TransferFailed);
-            }
-            self.paused = true;
-            self.env().emit_event(Paused {});
-            self.env().emit_event(EmergencyDrained { recipient, amount });
-
-            Ok(amount)
         }
 
         /// Creates a new vault for the caller with the transferred collateral and returns the vault ID.

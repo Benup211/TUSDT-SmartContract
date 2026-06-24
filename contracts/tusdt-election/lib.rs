@@ -63,7 +63,7 @@ mod election {
     pub(crate) const QUORUM_BPS: u32 = 2_000;
     /// Default alpha a candidate's coldkey must hold in the subnet it registers for, to be treated
     /// as that subnet's owner (the registration "owner" bar). Used directly by `register_candidate`.
-    pub(crate) const MIN_CANDIDATE_STAKE: u128 = 1_000_000_000_000;
+    pub(crate) const MIN_CANDIDATE_STAKE: u128 = 10_000_000_000_000;
 
     /// Lifecycle stage of the current election cycle.
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]

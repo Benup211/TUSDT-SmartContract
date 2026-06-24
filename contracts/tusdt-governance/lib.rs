@@ -33,7 +33,7 @@ mod governance {
     /// The council is a fixed-size committee; [`TusdtGovernance::set_council`] requires exactly
     /// this many distinct members.
     pub(crate) const COUNCIL_SIZE: usize = 5;
-    pub(crate) const DEFAULT_NETUID: u16 = 421;
+    pub(crate) const DEFAULT_NETUID: u16 = 113;
     pub(crate) const DEFAULT_VOTING_PERIOD_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
     pub(crate) const DEFAULT_APPROVAL_BPS: u32 = 5_001;
     /// Default quorum as a fraction of the alpha circulating supply, in basis points (2_000 = 20%).

@@ -101,7 +101,7 @@ fn constructor_sets_maintainer_and_defaults() {
     assert!(!gov.is_council(accounts.frank));
     assert_eq!(gov.proposal_count(), 0);
     // netuid is a top-level field (bound to the maintainer), not a tunable param.
-    assert_eq!(gov.netuid(), 421);
+    assert_eq!(gov.netuid(), 113);
     let p = gov.params();
     assert_eq!(p.voting_period_ms, 7 * 24 * 60 * 60 * 1_000);
     assert_eq!(p.approval_bps, 5_001);

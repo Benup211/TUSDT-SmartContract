@@ -13,9 +13,9 @@ mod oracle {
     const MIN_REPORTERS: u32 = 3;
     const PAGE_SIZE: u32 = 10;
     const MAX_ROUND_SUBMISSIONS: u32 = 256;
-    const DEFAULT_MAX_PRICE_DEVIATION_BASIS_POINTS: u32 = 2_000;
+    const DEFAULT_MAX_PRICE_DEVIATION_BASIS_POINTS: u32 = 1_000;
     /// Minimum subnet alpha stake required to submit a price (default 1e12, matching governance).
-    const DEFAULT_MIN_SUBMITTER_STAKE: u128 = 1_000_000_000_000;
+    const DEFAULT_MIN_SUBMITTER_STAKE: u128 = 10_000_000_000;
 
     /// Snapshot of a committed oracle round, including its final price and source median.
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
