@@ -1,6 +1,6 @@
 use super::vault::*;
 use ink::env::test;
-use tusdt_env::StakeInfo;
+use tusdt_env::{StakeAvailability, StakeInfo};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -67,9 +67,20 @@ impl test::ChainExtension for MockExtension {
                 0
             }
             15 => {
-                // get_alpha_price
-                let price: u64 = 1_000_000_000; // 1 TAO = 1 alpha
+                // get_alpha_price — 1_000_000_000 = 1 alpha = 1 TAO
+                let price: u64 = 1_000_000_000;
                 ink::scale::Encode::encode_to(&price, output);
+                0
+            }
+            // 36 = get_stake_availability
+            36 => {
+                let availability = tusdt_env::StakeAvailability {
+                    netuid: 1,
+                    total: self.stake.unwrap_or(0),
+                    locked: 0,
+                    available: self.stake.unwrap_or(0),
+                };
+                ink::scale::Encode::encode_to(&availability, output);
                 0
             }
             // Write ops (2 = remove_stake, 6 = transfer_stake) — no-op success

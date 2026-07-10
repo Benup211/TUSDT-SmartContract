@@ -713,7 +713,7 @@ mod vault {
             let fee = self.calculate_transaction_fee(vault.netuid, amount)?;
             let net_borrow_amount = amount.checked_sub(fee).ok_or(Error::ArithmeticError)?;
 
-            let price = self.current_collateral_price()?;
+            let price = self.current_collateral_price(vault.netuid)?;
 
             let max_borrow = self.max_borrow_allowed(vault.netuid, price, vault.collateral_balance)?;
             let projected_borrowed = vault
@@ -858,7 +858,7 @@ mod vault {
                 .checked_sub(amount)
                 .ok_or(Error::ArithmeticError)?;
             if vault.debt_balance > 0 {
-                let price = self.current_collateral_price()?;
+                let price = self.current_collateral_price(vault.netuid)?;
                 let max_borrow_after_release =
                     self.max_borrow_allowed(vault.netuid, price, projected_collateral)?;
                 if vault.debt_balance > max_borrow_after_release {
@@ -914,7 +914,7 @@ mod vault {
 
             let mut vault = self.load_vault(owner, vault_id)?;
             self.accrue_interest_for_vault(&mut vault)?;
-            let price = self.current_collateral_price()?;
+            let price = self.current_collateral_price(vault.netuid)?;
 
             if !self.is_liquidatable(price, &vault)? {
                 return Err(Error::NotLiquidatable);
@@ -927,10 +927,24 @@ mod vault {
                 .remove_stake(self.vault_hotkey, vault.netuid, collateral_amount)
                 .map_err(|_| Error::TransferFailed)?;
 
+            // Compute how much TAO was actually received from unstaking alpha.
+            // The chain extension's alpha price is RAO per alpha, scaled by 1e9.
+            let alpha_price_rao = self
+                .env()
+                .extension()
+                .get_alpha_price(vault.netuid)
+                .map_err(|_| Error::ChainExtensionFailed)?;
+            let alpha_to_tao = Ratio::from_inner(u128::from(alpha_price_rao))
+                .checked_div_int(1_000_000_000u128)
+                .ok_or(Error::ArithmeticError)?;
+            let tao_received = alpha_to_tao
+                .checked_mul_value(u128::from(collateral_amount))
+                .ok_or(Error::ArithmeticError)?;
+            let tao_received =
+                Balance::try_from(tao_received).map_err(|_| Error::ArithmeticError)?;
+
             // Zero out the vault's collateral immediately — the alpha has been
-            // unstaked and the TAO now sits in the contract's balance.  This
-            // prevents any borrow/repay/collateral-release path from seeing
-            // collateral that no longer exists as alpha stake.
+            // unstaked and the TAO now sits in the contract's balance.
             vault.collateral_balance = 0;
             self.total_collateral_balance = self
                 .total_collateral_balance
@@ -947,14 +961,15 @@ mod vault {
             );
             self.save_vault(owner, vault_id, &vault)?;
 
-            // Now the TAO is in the contract's balance. Create a standard auction.
+            // Now the TAO is in the contract's balance. Create a standard auction
+            // with the actual TAO amount received.
             let min_bid = self.liquidation_min_bid(vault.netuid, vault.debt_balance)?;
             let auction_id = self
                 .auction
                 .create_auction(
                     owner,
                     vault_id,
-                    collateral_amount,
+                    tao_received,
                     vault.debt_balance,
                     min_bid,
                     price,
@@ -1143,7 +1158,7 @@ mod vault {
                 .vaults
                 .get((owner, vault_id))
                 .ok_or(Error::VaultNotFound)?;
-            let price = self.current_collateral_price()?;
+            let price = self.current_collateral_price(vault.netuid)?;
             Self::collateral_value(price, vault.collateral_balance)
         }
 
@@ -1153,7 +1168,7 @@ mod vault {
                 .vaults
                 .get((owner, vault_id))
                 .ok_or(Error::VaultNotFound)?;
-            let price = self.current_collateral_price()?;
+            let price = self.current_collateral_price(vault.netuid)?;
             let max = self.max_borrow_allowed(vault.netuid, price, vault.collateral_balance)?;
 
             Ok(max)
@@ -1246,15 +1261,38 @@ mod vault {
                 .unwrap_or_else(Self::default_contract_params)
         }
 
-        /// Returns the latest validated collateral price from the oracle.
-        /// For root subnet (netuid 0): alpha = TAO 1:1, so TUSDT/alpha = TUSDT/TAO.
-        pub(crate) fn current_collateral_price(&self) -> Result<Ratio> {
+        /// Returns the collateral price for a given subnet: TUSDT per alpha unit.
+        ///
+        /// Combines two sources:
+        /// 1. TUSDT/TAO from the oracle contract
+        /// 2. Alpha/TAO from the chain extension (`get_alpha_price`, scaled by 1e9)
+        ///
+        /// Formula: `tusdt_per_alpha = tusdt_per_tao × (alpha_price_rao / 1_000_000_000)`
+        pub(crate) fn current_collateral_price(&self, netuid: u16) -> Result<Ratio> {
+            // TUSDT per TAO from oracle
             let price_data = Self::validate_price_data(
                 self.oracle.get_latest_price(),
                 self.env().block_timestamp(),
-                self.get_params(self.alpha_price_netuid).max_oracle_age_ms,
+                self.get_params(netuid).max_oracle_age_ms,
             )?;
-            Ok(price_data.price)
+            let tusdt_per_tao = price_data.price;
+
+            // Alpha per TAO from chain extension (RAO per alpha, 1 TAO = 1e9 RAO)
+            let alpha_price_rao = self
+                .env()
+                .extension()
+                .get_alpha_price(netuid)
+                .map_err(|_| Error::ChainExtensionFailed)?;
+
+            // Convert: alpha_to_tao = alpha_price_rao / 1_000_000_000
+            let alpha_to_tao = Ratio::from_inner(u128::from(alpha_price_rao))
+                .checked_div_int(1_000_000_000u128)
+                .ok_or(Error::ArithmeticError)?;
+
+            // TUSDT per alpha = TUSDT per TAO × (alpha per TAO)
+            tusdt_per_tao
+                .checked_mul(alpha_to_tao)
+                .ok_or(Error::ArithmeticError)
         }
 
         pub(crate) fn validate_price_data(
