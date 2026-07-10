@@ -731,7 +731,7 @@ fn vault_maintainer_forwarders_reject_non_maintainer() {
     );
     assert_eq!(gov.vault_unpause(), Err(Error::NotMaintainer));
     assert_eq!(
-        gov.vault_cancel_contract_params_update(),
+        gov.vault_cancel_contract_params_update(1),
         Err(Error::NotMaintainer)
     );
 }

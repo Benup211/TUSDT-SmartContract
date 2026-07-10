@@ -7015,7 +7015,7 @@ dependencies = [
  "tusdt-oracle",
  "tusdt-primitives",
  "tusdt-treasury",
- "tusdt-vault",
+ "tusdt-vault-alpha",
  "tusdt-voting",
 ]
 
@@ -7048,11 +7048,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "tusdt-vault"
+name = "tusdt-vault-alpha"
 version = "0.1.0"
 dependencies = [
  "ink",
- "ink_e2e",
  "tusdt-auction",
  "tusdt-env",
  "tusdt-erc20",

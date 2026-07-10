@@ -16,7 +16,7 @@ members = [
     "contracts/tusdt-erc20",
     "contracts/tusdt-auction",
     "contracts/tusdt-oracle",
-    "contracts/tusdt-vault",
+    "contracts/tusdt-vault-alpha",
     "contracts/tusdt-treasury",
     "contracts/tusdt-governance",
     "contracts/tusdt-election",

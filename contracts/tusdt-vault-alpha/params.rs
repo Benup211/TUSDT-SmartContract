@@ -4,7 +4,7 @@ const DEFAULT_COLLATERAL_RATIO_BASIS_POINTS: u32 = 15_000;
 const DEFAULT_LIQUIDATION_RATIO_BASIS_POINTS: u32 = 12_000;
 const DEFAULT_INTEREST_RATE_BASIS_POINTS: u32 = 1_000;
 const DEFAULT_LIQUIDATION_FEE_BASIS_POINTS: u32 = 1_100;
-const DEFAULT_BORROW_CAP: Balance = 5_000_000_000_000; // 10 Thousand
+const DEFAULT_BORROW_CAP: Balance = 5_000_000_000_000;
 const DEFAULT_MIN_VAULT_COLLATERAL: Balance = 5_000_000;
 const DEFAULT_MAX_VAULT_COLLATERAL: Balance = 1_000_000_000;
 const DEFAULT_MAX_TOTAL_COLLATERAL: Balance = 21_000_000_000;
@@ -13,7 +13,7 @@ const DEFAULT_AUCTION_DURATION_MS: u64 = 3_600_000;
 const DEFAULT_MAX_ORACLE_AGE_MS: u64 = 1_800_000;
 const MAX_AUCTION_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
-impl TusdtVault {
+impl TusdtVaultAlpha {
     pub(crate) fn default_contract_params() -> VaultContractParams {
         let params = VaultContractParams {
             collateral_ratio: Ratio::from_basis_points(DEFAULT_COLLATERAL_RATIO_BASIS_POINTS),
@@ -88,50 +88,39 @@ impl TusdtVault {
 
     pub(crate) fn validate_contract_params(params: &VaultContractParams) -> Result<()> {
         let one = Ratio::one();
-        // Collateral ratio should be greater than or equal to 100%.
         if params.collateral_ratio < one {
             return Err(Error::InvalidRatio);
         }
-        // Liquidation ratio should be greater than or equal to 100%.
         if params.liquidation_ratio < one {
             return Err(Error::InvalidRatio);
         }
-        // Liquidation ratio should be less than collateral ratio.
         if params.collateral_ratio <= params.liquidation_ratio {
             return Err(Error::InvalidRatio);
         }
-        // Interest rate should be less than or equal to 100%.
         if params.interest_rate > one {
             return Err(Error::InvalidRatio);
         }
-        // Liquidation fee should be less than or equal to 100%.
         if params.liquidation_fee > one {
             return Err(Error::InvalidRatio);
         }
-        // Transaction fee should be less than or equal to 100%.
         if params.transaction_fee > one {
             return Err(Error::InvalidRatio);
         }
-        // Auction duration should be at least a minute.
         if params.auction_duration_ms < 60_000 {
             return Err(Error::InvalidAuctionDuration);
         }
-        // Auction duration should be short enough to keep liquidations recoverable.
         if params.auction_duration_ms > MAX_AUCTION_DURATION_MS {
             return Err(Error::InvalidAuctionDuration);
         }
         if params.max_oracle_age_ms == 0 {
             return Err(Error::InvalidOracleMaxAge);
         }
-        // Minimum opening collateral must be positive so the floor is meaningful.
         if params.min_vault_collateral == 0 {
             return Err(Error::InvalidRatio);
         }
-        // Per-vault cap must accommodate at least one minimum-sized vault.
         if params.max_vault_collateral < params.min_vault_collateral {
             return Err(Error::InvalidRatio);
         }
-        // Global cap must accommodate at least one full per-vault cap.
         if params.max_total_collateral < params.max_vault_collateral {
             return Err(Error::InvalidRatio);
         }

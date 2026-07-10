@@ -17,7 +17,7 @@ mod governance {
     use tusdt_oracle::{PriceData, TusdtOracleRef};
     use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
-    use tusdt_vault::{TusdtVaultRef, VaultContractParamsConfig};
+    use tusdt_vault_alpha::{TusdtVaultAlphaRef, VaultContractParamsConfig};
 
     // Cross-contract forwarders that let governance drive the vault, auction, and oracle.
     // `forward_*` helpers defined here.
@@ -157,7 +157,7 @@ mod governance {
         /// The vault, auction, and oracle this governance contract steers. After deployment the
         /// vault's governance role (and, via the vault's propagation, the auction's and oracle's)
         /// is handed to this contract, so these forwarding calls are accepted as `governance`.
-        vault: TusdtVaultRef,
+        vault: TusdtVaultAlphaRef,
         auction: TusdtAuctionRef,
         oracle: TusdtOracleRef,
         /// The subnet whose alpha stake gates proposer eligibility. Bound to the elected maintainer
@@ -331,7 +331,7 @@ mod governance {
                 election: TusdtElectionRef::from_account_id(election),
                 council: Vec::new(),
                 treasury: TusdtTreasuryRef::from_account_id(treasury_address),
-                vault: TusdtVaultRef::from_account_id(vault_address),
+                vault: TusdtVaultAlphaRef::from_account_id(vault_address),
                 auction: TusdtAuctionRef::from_account_id(auction_address),
                 oracle: TusdtOracleRef::from_account_id(oracle_address),
                 netuid: DEFAULT_NETUID,
@@ -435,19 +435,20 @@ mod governance {
         // operational call, kept fast for emergencies.
         // ---------------------------------------------------------------------------------------
 
-        /// Schedules a vault contract-parameter update (behind the vault's timelock); maintainer-only.
+        /// Schedules a vault contract-parameter update for a specific netuid; maintainer-only.
         #[ink(message)]
         pub fn vault_set_contract_params(
             &mut self,
+            netuid: u16,
             params: VaultContractParamsConfig,
         ) -> Result<()> {
-            self.forward_vault_set_contract_params(params)
+            self.forward_vault_set_contract_params(netuid, params)
         }
 
-        /// Cancels the vault's currently scheduled contract-parameter update; maintainer-only.
+        /// Cancels the vault's currently scheduled contract-parameter update for a netuid; maintainer-only.
         #[ink(message)]
-        pub fn vault_cancel_contract_params_update(&mut self) -> Result<()> {
-            self.forward_vault_cancel_contract_params_update()
+        pub fn vault_cancel_contract_params_update(&mut self, netuid: u16) -> Result<()> {
+            self.forward_vault_cancel_contract_params_update(netuid)
         }
 
         /// Updates the vault's treasury (fee recipient) account; maintainer-only.

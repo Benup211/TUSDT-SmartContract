@@ -48,11 +48,13 @@ pub enum FunctionId {
     RemoveProxyV1 = 14,
     /// Reads the alpha price for a subnet (function 15).
     GetAlphaPriceV1 = 15,
+    /// Reads stake availability (total, locked, available) for a coldkey on a subnet (function 36).
+    GetStakeAvailabilityV1 = 36,
 }
 
-/// The 16-function chain extension at extension id `0x1000`. Exposes Bittensor subnet staking
+/// The 17-function chain extension at extension id `0x1000`. Exposes Bittensor subnet staking
 /// operations (add/remove/move/swap stake, stake limits, proxies, auto-stake) and alpha price
-/// queries. Functions 0 and 15 are read-only; functions 1–14 are write operations.
+/// queries. Functions 0, 15, and 36 are read-only; functions 1–14 are write operations.
 #[ink::chain_extension(extension = 0x1000)]
 pub trait RuntimeReadWrite {
     type ErrorCode = ReadWriteErrorCode;
@@ -176,6 +178,14 @@ pub trait RuntimeReadWrite {
     /// Reads the current alpha price for the specified subnet.
     #[ink(function = 15)]
     fn get_alpha_price(netuid: u16) -> u64;
+
+    /// Reads stake availability for a coldkey on a given subnet. Returns the total stake,
+    /// locked (non-transferable) portion, and available (withdrawable) portion.
+    #[ink(function = 36)]
+    fn get_stake_availability(
+        coldkey: <CustomEnvironment as ink::env::Environment>::AccountId,
+        netuid: u16,
+    ) -> StakeAvailability;
 }
 
 /// Error codes returned by the chain extension. Status code 0 indicates success; 1 indicates
@@ -233,4 +243,19 @@ pub struct StakeInfo<AccountId> {
     pub drain: Compact<u64>,
     /// Whether the (hotkey, coldkey) pair is registered on the subnet.
     pub is_registered: bool,
+}
+
+/// Stake availability for a coldkey on a given subnet, returned by the chain extension's
+/// `get_stake_availability` function (function 36). Aggregates stake across all hotkeys
+/// for the specified coldkey on the given subnet.
+#[ink::scale_derive(Encode, Decode, TypeInfo)]
+pub struct StakeAvailability {
+    /// The subnet identifier.
+    pub netuid: u16,
+    /// The total alpha stake for this coldkey on the subnet.
+    pub total: u64,
+    /// The locked (non-withdrawable) portion of the stake.
+    pub locked: u64,
+    /// The available (withdrawable) portion of the stake.
+    pub available: u64,
 }

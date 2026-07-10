@@ -15,18 +15,22 @@ impl TusdtGovernance {
 
     pub(crate) fn forward_vault_set_contract_params(
         &mut self,
+        netuid: u16,
         params: VaultContractParamsConfig,
     ) -> Result<()> {
         self.ensure_maintainer()?;
         self.vault
-            .set_contract_params(params)
+            .set_contract_params(netuid, params)
             .map_err(|_| Error::VaultCallFailed)
     }
 
-    pub(crate) fn forward_vault_cancel_contract_params_update(&mut self) -> Result<()> {
+    pub(crate) fn forward_vault_cancel_contract_params_update(
+        &mut self,
+        netuid: u16,
+    ) -> Result<()> {
         self.ensure_maintainer()?;
         self.vault
-            .cancel_contract_params_update()
+            .cancel_contract_params_update(netuid)
             .map_err(|_| Error::VaultCallFailed)
     }
 
