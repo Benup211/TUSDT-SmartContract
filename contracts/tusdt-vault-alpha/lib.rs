@@ -1,6 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
-pub use self::vault::{TusdtVault, TusdtVaultRef, VaultContractParamsConfig};
+pub use self::vault::{TusdtVaultAlpha, TusdtVaultAlphaRef, VaultContractParamsConfig};
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
 mod vault {
@@ -30,13 +30,15 @@ mod vault {
         include!("vault_access.rs");
     }
 
-    /// A user's CDP record: collateral held, principal borrowed, accrued debt, and timestamps.
+    /// A user's CDP record backed by subnet alpha: alpha stake held, principal borrowed, accrued debt, and timestamps.
     #[derive(Debug, Clone)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct Vault {
         pub id: u32,
         pub owner: AccountId,
+        /// Which approved subnet this vault's alpha is from.
+        pub netuid: u16,
         pub collateral_balance: Balance,
         pub borrowed_token_balance: Balance,
         pub debt_balance: Balance,
@@ -90,33 +92,51 @@ mod vault {
         pub execute_after: u64,
     }
 
-    /// Vault storage: roles, child contract refs, risk params, and all per-owner CDP records.
+    /// Vault storage: roles, child contract refs, risk params, and all per-owner CDP records
+    /// backed by subnet alpha stake.
     #[ink(storage)]
-    pub struct TusdtVault {
+    pub struct TusdtVaultAlpha {
         governance: AccountId,
         treasury: AccountId,
         platform: AccountId,
         paused: bool,
 
-        // Token address of tusdt.
+        /// Token address of tUSDT.
         token: TusdtErc20Ref,
-        // Auction contract address
+        /// Auction contract address.
         auction: TusdtAuctionRef,
-        // External oracle providing raw TUSDT units per 1 raw collateral unit.
+        /// External oracle providing TUSDT/TAO price.
         oracle: TusdtOracleRef,
         total_collateral_balance: Balance,
 
-        params: VaultContractParams,
-        pending_contract_params_update: Option<PendingContractParamsUpdate>,
+        /// The hotkey where all alpha collateral for this vault instance is staked.
+        vault_hotkey: AccountId,
+
+        /// The subnet whose alpha price is used for collateral valuation.
+        alpha_price_netuid: u16,
+
+        /// Set of netuids whose alpha is accepted as collateral. Managed by governance.
+        approved_netuids: Mapping<u16, ()>,
+
+        /// Per-netuid total collateral.  Used to validate that the contract's
+        /// actual stake on each subnet covers the sum of all vaults on that subnet.
+        netuid_total_collateral: Mapping<u16, Balance>,
+
+        netuid_params: Mapping<u16, VaultContractParams>,
+        pending_contract_params_updates: Mapping<u16, PendingContractParamsUpdate>,
 
         vaults: Mapping<(AccountId, u32), Vault>,
         owner_total_debt: Mapping<AccountId, Balance>,
         vault_count: Mapping<AccountId, u32>,
         vault_keys: StorageVec<(AccountId, u32)>,
         liquidation_auctions: Mapping<(AccountId, u32), u32>,
+        /// Two-step deposit: (caller, netuid) → amount. The caller must register their
+        /// intended deposit amount and target subnet before transferring alpha stake
+        /// externally, then call `create_alpha_vault` to claim it.
+        pending_deposits: Mapping<(AccountId, u16), Balance>,
     }
 
-    /// Emitted when a new vault is opened with initial collateral.
+    /// Emitted when a new alpha-backed vault is opened.
     #[ink(event)]
     pub struct VaultCreated {
         #[ink(topic)]
@@ -126,7 +146,7 @@ mod vault {
         amount: Balance,
     }
 
-    /// Emitted when collateral is added to an existing vault.
+    /// Emitted when alpha collateral is topped up on an existing vault.
     #[ink(event)]
     pub struct CollateralAdded {
         #[ink(topic)]
@@ -136,7 +156,7 @@ mod vault {
         amount: Balance,
     }
 
-    /// Emitted when collateral is withdrawn from a vault.
+    /// Emitted when alpha collateral is returned to the user.
     #[ink(event)]
     pub struct CollateralReleased {
         #[ink(topic)]
@@ -144,9 +164,10 @@ mod vault {
         #[ink(topic)]
         vault_id: u32,
         amount: Balance,
+        dest_coldkey: AccountId,
     }
 
-    /// Emitted when tUSDT is borrowed against a vault; `amount` is gross, fee is the treasury cut.
+    /// Emitted when tUSDT is borrowed against a vault.
     #[ink(event)]
     pub struct TokensBorrowed {
         #[ink(topic)]
@@ -157,7 +178,7 @@ mod vault {
         transaction_fee: Balance,
     }
 
-    /// Emitted when borrowed tUSDT is repaid; fee is paid in addition to the principal repayment.
+    /// Emitted when borrowed tUSDT is repaid.
     #[ink(event)]
     pub struct TokensRepaid {
         #[ink(topic)]
@@ -180,26 +201,22 @@ mod vault {
         accrued_at: u64,
     }
 
-    /// Emitted after a scheduled parameter update is executed and becomes active.
     #[ink(event)]
     pub struct ContractParamsUpdated {
         params: VaultContractParamsConfig,
     }
 
-    /// Emitted when a parameter update is queued behind the timelock.
     #[ink(event)]
     pub struct ContractParamsUpdateScheduled {
         params: VaultContractParamsConfig,
         execute_after: u64,
     }
 
-    /// Emitted when a pending parameter update is cancelled by governance.
     #[ink(event)]
     pub struct ContractParamsUpdateCancelled {
         params: VaultContractParamsConfig,
     }
 
-    /// Emitted when governance control is transferred (and propagated to child contracts).
     #[ink(event)]
     pub struct VaultGovernanceUpdated {
         #[ink(topic)]
@@ -208,7 +225,6 @@ mod vault {
         new_governance: AccountId,
     }
 
-    /// Emitted when the treasury (fee recipient) account is updated.
     #[ink(event)]
     pub struct VaultTreasuryUpdated {
         #[ink(topic)]
@@ -217,7 +233,6 @@ mod vault {
         new_treasury: AccountId,
     }
 
-    /// Emitted when the platform account is updated.
     #[ink(event)]
     pub struct VaultPlatformUpdated {
         #[ink(topic)]
@@ -226,15 +241,12 @@ mod vault {
         new_platform: AccountId,
     }
 
-    /// Emitted when the contract is paused.
     #[ink(event)]
     pub struct Paused {}
 
-    /// Emitted when the contract is unpaused.
     #[ink(event)]
     pub struct Unpaused {}
 
-    /// Emitted when surplus tUSDT held by the vault is claimed to governance.
     #[ink(event)]
     pub struct SurplusTusdtClaimed {
         #[ink(topic)]
@@ -242,7 +254,6 @@ mod vault {
         amount: Balance,
     }
 
-    /// Emitted when a liquidation auction is created for an unsafe vault.
     #[ink(event)]
     pub struct LiquidationAuctionCreated {
         #[ink(topic)]
@@ -253,7 +264,6 @@ mod vault {
         auction_id: u32,
     }
 
-    /// Emitted when a liquidation auction is settled: collateral leaves the vault and debt is cleared.
     #[ink(event)]
     pub struct VaultLiquidated {
         #[ink(topic)]
@@ -269,93 +279,73 @@ mod vault {
         debt_cleared: Balance,
     }
 
-    /// Errors returned by the vault contract.
+    /// Errors returned by the alpha vault contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
         VaultNotFound,
-        /// Vault has less collateral than required (or below the minimum opening collateral).
         InsufficientCollateral,
-        /// Per-vault or protocol-wide collateral cap would be exceeded by this operation.
         CollateralCapExceeded,
-        /// Caller is not the owner of the targeted vault.
         NotVaultOwner,
-        /// Underlying native or token transfer failed.
         TransferFailed,
-        /// Caller's tUSDT balance is below the required repayment + fee.
         InsufficientTokenBalance,
         InvalidTransactionFee,
-        /// Operation requires the vault to have zero borrowed principal.
         TokenBorrowedNotZero,
-        /// A ratio parameter was out of range.
         InvalidRatio,
-        /// Auction duration parameter is zero or above the maximum.
         InvalidAuctionDuration,
-        /// Action would push the vault above its collateral ratio.
         CollateralRatioExceeded,
         LiquidationRatioExceeded,
-        /// Action would push protocol-wide debt past the borrow cap.
         BorrowCapExceeded,
-        /// Repayment amount exceeds the current debt balance.
         RepayAmountTooHigh,
-        /// Vault is already mid-liquidation.
         VaultInLiquidation,
-        /// Vault does not meet the criteria to be liquidated.
         NotLiquidatable,
-        /// A liquidation auction already exists for this vault.
         LiquidationAuctionExists,
         AuctionContractCallFailed,
         AuctionNotFound,
-        /// Operation requires the referenced auction to be finalized.
         AuctionNotFinalized,
-        /// Arithmetic overflow or underflow.
         ArithmeticError,
-        /// Caller is not the governance account.
         NotGovernance,
-        /// Caller is neither the governance nor the platform account.
         NotGovernanceOrPlatform,
-        /// Contract is currently paused.
         ContractPaused,
         OracleCallFailed,
-        /// Oracle has no committed price yet.
         OraclePriceUnavailable,
-        /// Latest oracle price is older than `max_oracle_age_ms`.
         OraclePriceStale,
         InvalidOracleMaxAge,
-        /// No parameter update is queued.
         NoPendingContractParamsUpdate,
-        /// Pending parameter update's timelock has not yet elapsed.
         ContractParamsUpdateTimelockActive,
+        /// Chain extension call failed at the node level.
+        ChainExtensionFailed,
+        /// No alpha stake found for the vault's configured (hotkey, netuid).
+        NoAlphaStakeFound,
+        /// Caller did not register a deposit intent before calling create_alpha_vault.
+        NotDepositor,
+        /// The specified netuid is not in the approved set.
+        UnapprovedNetuid,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
 
-    /// Breaks a debt repayment into its principal and interest components.
-    ///
-    /// When a user repays TUSDT, the payment is first applied to any outstanding
-    /// (unpaid) interest, and the remainder reduces the principal debt balance.
-    /// This struct captures the split result so callers can log or emit both portions.
     #[derive(Debug, PartialEq, Eq)]
     pub(crate) struct DebtPaymentBreakdown {
-        /// The portion of the repayment that reduces the borrowed principal.
         pub principal_payment: Balance,
-        /// The portion of the repayment that covers accrued but unpaid interest.
         pub interest_payment: Balance,
     }
 
-    impl TusdtVault {
-        /// Initializes the vault by wiring up the treasury fee recipient and instantiating the
-        /// token, auction, and oracle child contracts.
-        ///
-        /// `treasury` must be a deployed treasury contract address; governance can
-        /// later reassign it via `update_treasury`.
+    impl TusdtVaultAlpha {
+        /// Initializes the alpha vault. `hotkey` is the single staking position for this
+        /// vault instance. `alpha_price_netuid` specifies which subnet's alpha price to use
+        /// for valuation — typically 0 (root, 1:1 with TAO). `oracle_netuid` is the subnet
+        /// whose registered neurons may submit oracle prices. Governance must call
+        /// `set_approved_netuid` to enable vault creation for specific subnets.
         #[ink(constructor)]
         pub fn new(
             treasury: AccountId,
             token_code_hash: Hash,
             auction_code_hash: Hash,
             oracle_code_hash: Hash,
-            netuid: u16,
+            oracle_netuid: u16,
+            hotkey: AccountId,
+            alpha_price_netuid: u16,
         ) -> Self {
             let governance = Self::env().caller();
 
@@ -370,13 +360,11 @@ mod vault {
                 .endowment(0)
                 .salt_bytes([1; 32])
                 .instantiate();
-            let oracle = TusdtOracleRef::new(contract_account, governance, netuid)
+            let oracle = TusdtOracleRef::new(contract_account, governance, oracle_netuid)
                 .code_hash(oracle_code_hash)
                 .endowment(0)
                 .salt_bytes([2; 32])
                 .instantiate();
-
-            let params = Self::default_contract_params();
 
             Self {
                 governance,
@@ -387,19 +375,31 @@ mod vault {
                 auction,
                 oracle,
                 total_collateral_balance: 0,
-                params,
-                pending_contract_params_update: None,
+                vault_hotkey: hotkey,
+                alpha_price_netuid,
+                approved_netuids: Mapping::default(),
+                netuid_total_collateral: Mapping::default(),
+                netuid_params: Mapping::default(),
+                pending_contract_params_updates: Mapping::default(),
                 vaults: Mapping::default(),
                 owner_total_debt: Mapping::default(),
                 vault_count: Mapping::default(),
                 vault_keys: StorageVec::default(),
                 liquidation_auctions: Mapping::default(),
+                pending_deposits: Mapping::default(),
             }
         }
 
-        /// Schedules a contract parameter update with a fixed timelock; only callable by governance.
+        // ── Governance & admin ──────────────────────────────────────────
+
+        /// Schedules a per-netuid parameter update with the standard timelock.
+        /// Only governance may call.
         #[ink(message)]
-        pub fn set_contract_params(&mut self, params: VaultContractParamsConfig) -> Result<()> {
+        pub fn set_contract_params(
+            &mut self,
+            netuid: u16,
+            params: VaultContractParamsConfig,
+        ) -> Result<()> {
             self.ensure_governance()?;
 
             Self::contract_params_from_config(params)?;
@@ -409,10 +409,11 @@ mod vault {
                 .block_timestamp()
                 .checked_add(CONTRACT_PARAMS_TIMELOCK_MS)
                 .ok_or(Error::ArithmeticError)?;
-            self.pending_contract_params_update = Some(PendingContractParamsUpdate {
-                params,
-                execute_after,
-            });
+            self.pending_contract_params_updates
+                .insert(netuid, &PendingContractParamsUpdate {
+                    params,
+                    execute_after,
+                });
 
             self.env().emit_event(ContractParamsUpdateScheduled {
                 params,
@@ -422,18 +423,20 @@ mod vault {
             Ok(())
         }
 
-        /// Executes the currently scheduled contract parameter update once its timelock has elapsed.
+        /// Executes the currently scheduled parameter update for a netuid once its timelock has elapsed.
         #[ink(message)]
-        pub fn execute_contract_params_update(&mut self) -> Result<()> {
+        pub fn execute_contract_params_update(&mut self, netuid: u16) -> Result<()> {
             let pending = self
-                .pending_contract_params_update
+                .pending_contract_params_updates
+                .get(netuid)
                 .ok_or(Error::NoPendingContractParamsUpdate)?;
             if self.env().block_timestamp() < pending.execute_after {
                 return Err(Error::ContractParamsUpdateTimelockActive);
             }
 
-            self.params = Self::contract_params_from_config(pending.params)?;
-            self.pending_contract_params_update = None;
+            let new_params = Self::contract_params_from_config(pending.params)?;
+            self.netuid_params.insert(netuid, &new_params);
+            self.pending_contract_params_updates.remove(netuid);
 
             self.env().emit_event(ContractParamsUpdated {
                 params: pending.params,
@@ -442,15 +445,16 @@ mod vault {
             Ok(())
         }
 
-        /// Cancels the currently scheduled contract parameter update; only callable by governance.
+        /// Cancels the currently scheduled parameter update for a netuid. Governance only.
         #[ink(message)]
-        pub fn cancel_contract_params_update(&mut self) -> Result<()> {
+        pub fn cancel_contract_params_update(&mut self, netuid: u16) -> Result<()> {
             self.ensure_governance()?;
 
             let pending = self
-                .pending_contract_params_update
-                .take()
+                .pending_contract_params_updates
+                .get(netuid)
                 .ok_or(Error::NoPendingContractParamsUpdate)?;
+            self.pending_contract_params_updates.remove(netuid);
 
             self.env().emit_event(ContractParamsUpdateCancelled {
                 params: pending.params,
@@ -459,7 +463,6 @@ mod vault {
             Ok(())
         }
 
-        /// Transfers vault governance to a new account, propagating the change to the child auction and oracle contracts.
         #[ink(message)]
         pub fn update_governance(&mut self, new_governance: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -477,7 +480,6 @@ mod vault {
             Ok(())
         }
 
-        /// Updates the treasury (fee recipient) account; governance-only.
         #[ink(message)]
         pub fn update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -493,7 +495,6 @@ mod vault {
             Ok(())
         }
 
-        /// Updates the platform (pause-capable operator) account; callable by governance account
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -509,7 +510,6 @@ mod vault {
             Ok(())
         }
 
-        /// Pauses the contract, blocking user-facing mutations; callable by governance or platform.
         #[ink(message)]
         pub fn pause(&mut self) -> Result<()> {
             self.ensure_governance_or_platform()?;
@@ -520,7 +520,6 @@ mod vault {
             Ok(())
         }
 
-        /// Unpauses the contract; governance-only (platform cannot unpause).
         #[ink(message)]
         pub fn unpause(&mut self) -> Result<()> {
             self.ensure_governance()?;
@@ -531,12 +530,36 @@ mod vault {
             Ok(())
         }
 
+        #[ink(message)]
+        pub fn set_alpha_price_netuid(&mut self, netuid: u16) -> Result<()> {
+            self.ensure_governance()?;
+            self.alpha_price_netuid = netuid;
+            Ok(())
+        }
+
+        /// Adds or removes a netuid from the approved set. Only governance may call.
+        #[ink(message)]
+        pub fn set_approved_netuid(&mut self, netuid: u16, approved: bool) -> Result<()> {
+            self.ensure_governance()?;
+            if approved {
+                self.approved_netuids.insert(netuid, &());
+            } else {
+                self.approved_netuids.remove(netuid);
+            }
+            Ok(())
+        }
+
+        /// Returns `true` if the given netuid is approved for collateral.
+        #[ink(message)]
+        pub fn is_approved_netuid(&self, netuid: u16) -> bool {
+            self.approved_netuids.get(netuid).is_some()
+        }
+
         /// Transfers surplus TUSDT held by the vault contract to the treasury.
-        ///
-        /// Permissionless — anyone may sweep accumulated surplus into the treasury, where it will
-        /// be booked across the funds on the next `distribute()` call.
+        /// Callable by governance or platform.
         #[ink(message)]
         pub fn claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
+            self.ensure_governance_or_platform()?;
             self.token
                 .transfer(self.treasury, amount)
                 .map_err(|_| Error::TransferFailed)?;
@@ -549,14 +572,57 @@ mod vault {
             Ok(())
         }
 
-        /// Creates a new vault for the caller with the transferred collateral and returns the vault ID.
-        #[ink(message, payable)]
-        pub fn create_vault(&mut self) -> Result<u32> {
+        // ── Alpha vault lifecycle ───────────────────────────────────────
+
+        /// Step 1 of the two-step alpha deposit: registers the caller's intent to deposit
+        /// the given amount of alpha stake on the specified subnet. After calling this, the
+        /// user must transfer their alpha stake for this vault's hotkey to this contract via
+        /// a subtensor `transfer_stake` extrinsic, then call `create_alpha_vault(netuid)`.
+        #[ink(message)]
+        pub fn deposit_alpha(&mut self, amount: Balance, netuid: u16) -> Result<()> {
             self.ensure_not_paused()?;
+            self.ensure_approved_netuid(netuid)?;
+
+            if amount == 0 {
+                return Err(Error::InsufficientCollateral);
+            }
+            let caller = self.env().caller();
+            if self.pending_deposits.get((caller, netuid)).is_some() {
+                return Err(Error::InsufficientCollateral);
+            }
+
+            self.pending_deposits.insert((caller, netuid), &amount);
+            Ok(())
+        }
+
+        /// Creates a new alpha-backed vault for the caller on the specified subnet. The
+        /// caller must have first called `deposit_alpha(amount, netuid)` to register intent,
+        /// then transferred alpha stake for this vault's hotkey to this contract via a
+        /// subtensor `transfer_stake` extrinsic.
+        #[ink(message)]
+        pub fn create_alpha_vault(&mut self, netuid: u16) -> Result<u32> {
+            self.ensure_not_paused()?;
+            self.ensure_approved_netuid(netuid)?;
 
             let caller = self.env().caller();
-            let amount = self.env().transferred_value();
-            let (_, projected_total) = self.ensure_collateral_bounds(0, amount)?;
+
+            let amount = self
+                .pending_deposits
+                .get((caller, netuid))
+                .ok_or(Error::NotDepositor)?;
+
+            // Verify the contract holds enough stake on this subnet to cover all
+            // existing vaults on this netuid plus this new allocation.
+            let current_stake = self.get_contract_stake(netuid)?;
+            let netuid_total = self.netuid_total_collateral.get(netuid).unwrap_or_default();
+            let required = netuid_total
+                .checked_add(amount)
+                .ok_or(Error::ArithmeticError)?;
+            if current_stake < required {
+                return Err(Error::InsufficientCollateral);
+            }
+
+            let (_, projected_total) = self.ensure_collateral_bounds(netuid, 0, amount)?;
 
             let timestamp = self.env().block_timestamp();
 
@@ -564,6 +630,7 @@ mod vault {
             let vault = Vault {
                 id: vault_id,
                 owner: caller,
+                netuid,
                 collateral_balance: amount,
                 borrowed_token_balance: 0,
                 debt_balance: 0,
@@ -574,7 +641,9 @@ mod vault {
 
             self.save_vault(caller, vault_id, &vault)?;
             self.vault_keys.push(&(caller, vault_id));
+            self.pending_deposits.remove((caller, netuid));
             self.total_collateral_balance = projected_total;
+            self.netuid_total_collateral.insert(netuid, &required);
 
             let next_id = vault_id.checked_add(1).ok_or(Error::ArithmeticError)?;
             self.vault_count.insert(caller, &next_id);
@@ -588,33 +657,47 @@ mod vault {
             Ok(vault_id)
         }
 
-        /// Adds the transferred collateral amount to an existing vault.
-        #[ink(message, payable)]
-        pub fn add_collateral(&mut self, vault_id: u32) -> Result<()> {
+        /// Re-syncs an alpha vault's collateral from the chain. The caller must have
+        /// transferred additional alpha stake to this contract externally. This message
+        /// queries the chain extension to discover the new stake amount and updates the
+        /// vault record.
+        #[ink(message)]
+        pub fn add_alpha_collateral(&mut self, vault_id: u32) -> Result<()> {
             self.ensure_not_paused()?;
 
             let (caller, mut vault) = self.load_caller_vault(vault_id)?;
-            let amount = self.env().transferred_value();
+            let current_stake = self.get_contract_stake(vault.netuid)?;
+
+            let netuid_total = self
+                .netuid_total_collateral
+                .get(vault.netuid)
+                .unwrap_or_default();
+            let addition = current_stake
+                .checked_sub(netuid_total)
+                .ok_or(Error::InsufficientCollateral)?;
 
             let (projected_vault, projected_total) =
-                self.ensure_collateral_bounds(vault.collateral_balance, amount)?;
+                self.ensure_collateral_bounds(vault.netuid, vault.collateral_balance, addition)?;
 
             vault.collateral_balance = projected_vault;
             self.total_collateral_balance = projected_total;
+            let projected_netuid = netuid_total
+                .checked_add(addition)
+                .ok_or(Error::ArithmeticError)?;
+            self.netuid_total_collateral
+                .insert(vault.netuid, &projected_netuid);
             self.save_vault(caller, vault_id, &vault)?;
 
             self.env().emit_event(CollateralAdded {
                 owner: caller,
                 vault_id,
-                amount,
+                amount: addition,
             });
 
             Ok(())
         }
 
-        /// Borrows tokens against the vault's collateral, validating collateral ratio,
-        /// accruing interest, minting the fee portion to the treasury, and sending
-        /// the net borrowed tokens to the caller.
+        /// Borrows tokens against the vault's alpha collateral.
         #[ink(message)]
         pub fn borrow_token(&mut self, vault_id: u32, amount: Balance) -> Result<()> {
             self.ensure_not_paused()?;
@@ -623,17 +706,16 @@ mod vault {
 
             self.accrue_interest_for_vault(&mut vault)?;
 
-            // If amount is 0, we still want to accrue interest, but no need to mint tokens.
             if amount.eq(&0) {
                 self.save_vault(caller, vault_id, &vault)?;
                 return Ok(());
             }
-            let fee = self.calculate_transaction_fee(amount)?;
+            let fee = self.calculate_transaction_fee(vault.netuid, amount)?;
             let net_borrow_amount = amount.checked_sub(fee).ok_or(Error::ArithmeticError)?;
 
-            let price = self.current_collateral_price()?;
+            let price = self.current_collateral_price(vault.netuid)?;
 
-            let max_borrow = self.max_borrow_allowed(price, vault.collateral_balance)?;
+            let max_borrow = self.max_borrow_allowed(vault.netuid, price, vault.collateral_balance)?;
             let projected_borrowed = vault
                 .borrowed_token_balance
                 .checked_add(amount)
@@ -650,7 +732,7 @@ mod vault {
                 .total_supply()
                 .checked_add(amount)
                 .ok_or(Error::ArithmeticError)?;
-            if projected_total_supply > self.params.borrow_cap {
+            if projected_total_supply > self.get_params(vault.netuid).borrow_cap {
                 return Err(Error::BorrowCapExceeded);
             }
 
@@ -680,8 +762,7 @@ mod vault {
             Ok(())
         }
 
-        /// Repays borrowed tokens from a vault, charging the transaction fee in TUSDT,
-        /// routing accrued interest and the fee to the treasury, and burning only principal net supply.
+        /// Repays borrowed tokens from an alpha vault.
         #[ink(message)]
         pub fn repay_token(&mut self, vault_id: u32, amount: Balance) -> Result<()> {
             self.ensure_not_paused()?;
@@ -696,7 +777,7 @@ mod vault {
             if amount > vault.debt_balance {
                 return Err(Error::RepayAmountTooHigh);
             }
-            let fee = self.calculate_transaction_fee(amount)?;
+            let fee = self.calculate_transaction_fee(vault.netuid, amount)?;
             let total_token_charge = amount.checked_add(fee).ok_or(Error::ArithmeticError)?;
             self.ensure_token_balance_at_least(caller, total_token_charge)?;
 
@@ -727,7 +808,7 @@ mod vault {
             Ok(())
         }
 
-        /// Accrues any elapsed interest for a vault and returns the updated debt balance.
+        /// Accrues any elapsed interest for a vault.
         #[ink(message)]
         pub fn accrue_interest(&mut self, owner: AccountId, vault_id: u32) -> Result<Balance> {
             self.ensure_not_paused()?;
@@ -753,9 +834,16 @@ mod vault {
             Ok(debt_balance)
         }
 
-        /// Releases collateral from a vault while ensuring the remaining collateral maintains the minimum collateral ratio.
+        /// Releases alpha collateral from a vault, returning the stake to a destination
+        /// coldkey via the chain extension. Validates that the remaining collateral still
+        /// satisfies ratio requirements.
         #[ink(message)]
-        pub fn release_collateral(&mut self, vault_id: u32, amount: Balance) -> Result<()> {
+        pub fn release_alpha_collateral(
+            &mut self,
+            vault_id: u32,
+            amount: Balance,
+            dest_coldkey: AccountId,
+        ) -> Result<()> {
             self.ensure_not_paused()?;
 
             let (caller, mut vault) = self.load_caller_vault(vault_id)?;
@@ -770,22 +858,32 @@ mod vault {
                 .checked_sub(amount)
                 .ok_or(Error::ArithmeticError)?;
             if vault.debt_balance > 0 {
-                let price = self.current_collateral_price()?;
+                let price = self.current_collateral_price(vault.netuid)?;
                 let max_borrow_after_release =
-                    self.max_borrow_allowed(price, projected_collateral)?;
+                    self.max_borrow_allowed(vault.netuid, price, projected_collateral)?;
                 if vault.debt_balance > max_borrow_after_release {
                     return Err(Error::CollateralRatioExceeded);
                 }
             }
 
-            if self.env().transfer(caller, amount).is_err() {
-                return Err(Error::TransferFailed);
-            }
+            // Transfer stake back to the user via chain extension.
+            self.env()
+                .extension()
+                .transfer_stake(dest_coldkey, self.vault_hotkey, vault.netuid, vault.netuid, amount)
+                .map_err(|_| Error::ChainExtensionFailed)?;
 
             self.total_collateral_balance = self
                 .total_collateral_balance
                 .checked_sub(amount)
                 .ok_or(Error::ArithmeticError)?;
+            let netuid_total = self
+                .netuid_total_collateral
+                .get(vault.netuid)
+                .unwrap_or_default();
+            self.netuid_total_collateral.insert(
+                vault.netuid,
+                &netuid_total.checked_sub(amount).ok_or(Error::ArithmeticError)?,
+            );
             vault.collateral_balance = projected_collateral;
             self.save_vault(caller, vault_id, &vault)?;
 
@@ -793,12 +891,15 @@ mod vault {
                 owner: caller,
                 vault_id,
                 amount,
+                dest_coldkey,
             });
 
             Ok(())
         }
 
-        /// Initiates a liquidation auction for an unsafe vault, returning the auction ID if successful.
+        /// Initiates a liquidation auction for an unsafe alpha vault. This first unstakes
+        /// the alpha collateral to native TAO via the chain extension, then creates a
+        /// standard Dutch auction with the recovered TAO.
         #[ink(message)]
         pub fn trigger_liquidation_auction(
             &mut self,
@@ -813,27 +914,69 @@ mod vault {
 
             let mut vault = self.load_vault(owner, vault_id)?;
             self.accrue_interest_for_vault(&mut vault)?;
-            let price = self.current_collateral_price()?;
+            let price = self.current_collateral_price(vault.netuid)?;
 
             if !self.is_liquidatable(price, &vault)? {
                 return Err(Error::NotLiquidatable);
             }
 
-            let min_bid = self.liquidation_min_bid(vault.debt_balance)?;
+            // Unstake all alpha collateral to recover TAO into the contract's balance.
+            let collateral_amount = vault.collateral_balance;
+            self.env()
+                .extension()
+                .remove_stake(self.vault_hotkey, vault.netuid, collateral_amount)
+                .map_err(|_| Error::TransferFailed)?;
+
+            // Compute how much TAO was actually received from unstaking alpha.
+            // The chain extension's alpha price is RAO per alpha, scaled by 1e9.
+            let alpha_price_rao = self
+                .env()
+                .extension()
+                .get_alpha_price(vault.netuid)
+                .map_err(|_| Error::ChainExtensionFailed)?;
+            let alpha_to_tao = Ratio::from_inner(u128::from(alpha_price_rao))
+                .checked_div_int(1_000_000_000u128)
+                .ok_or(Error::ArithmeticError)?;
+            let tao_received = alpha_to_tao
+                .checked_mul_value(u128::from(collateral_amount))
+                .ok_or(Error::ArithmeticError)?;
+            let tao_received =
+                Balance::try_from(tao_received).map_err(|_| Error::ArithmeticError)?;
+
+            // Zero out the vault's collateral immediately — the alpha has been
+            // unstaked and the TAO now sits in the contract's balance.
+            vault.collateral_balance = 0;
+            self.total_collateral_balance = self
+                .total_collateral_balance
+                .checked_sub(collateral_amount)
+                .ok_or(Error::ArithmeticError)?;
+            let netuid_total = self
+                .netuid_total_collateral
+                .get(vault.netuid)
+                .unwrap_or_default();
+            self.netuid_total_collateral.insert(
+                vault.netuid,
+                &netuid_total.checked_sub(collateral_amount)
+                    .ok_or(Error::ArithmeticError)?,
+            );
+            self.save_vault(owner, vault_id, &vault)?;
+
+            // Now the TAO is in the contract's balance. Create a standard auction
+            // with the actual TAO amount received.
+            let min_bid = self.liquidation_min_bid(vault.netuid, vault.debt_balance)?;
             let auction_id = self
                 .auction
                 .create_auction(
                     owner,
                     vault_id,
-                    vault.collateral_balance,
+                    tao_received,
                     vault.debt_balance,
                     min_bid,
                     price,
-                    Some(self.params.auction_duration_ms),
+                    Some(self.get_params(vault.netuid).auction_duration_ms),
                 )
                 .map_err(|_| Error::AuctionContractCallFailed)?;
 
-            self.save_vault(owner, vault_id, &vault)?;
             self.liquidation_auctions
                 .insert((owner, vault_id), &auction_id);
 
@@ -848,9 +991,6 @@ mod vault {
 
         /// Settles a finalized liquidation auction, transferring collateral to the winner,
         /// routing accrued interest to the treasury, and burning only principal.
-        ///
-        /// This remains callable while paused so governance can freeze new mutations without
-        /// trapping already-finalized auction proceeds in the auction contract.
         #[ink(message)]
         pub fn settle_liquidation_auction(
             &mut self,
@@ -878,10 +1018,18 @@ mod vault {
 
             let mut vault = self.load_vault(owner, vault_id)?;
             let collateral_sold = auction.collateral_balance;
-            let transaction_fee = self.calculate_transaction_fee(collateral_sold)?;
+            let transaction_fee = self.calculate_transaction_fee(vault.netuid, collateral_sold)?;
             let debt_cleared = auction.debt_balance;
             let payment = Self::apply_debt_payment(&mut vault, debt_cleared)?;
 
+            // ── Effects first (CEI): collateral was already zeroed and subtracted
+            //     from total_collateral_balance in trigger_liquidation_auction when
+            //     the alpha was unstaked.  Only vault debt state and the liquidation
+            //     marker need cleanup here.
+            self.save_vault(owner, vault_id, &vault)?;
+            self.liquidation_auctions.remove((owner, vault_id));
+
+            // ── Interactions: external calls and transfers.
             self.auction
                 .transfer_winning_bid(auction_id, self.env().account_id())
                 .map_err(|_| Error::AuctionContractCallFailed)?;
@@ -905,18 +1053,6 @@ mod vault {
                     .map_err(|_| Error::TransferFailed)?;
             }
 
-            vault.collateral_balance = vault
-                .collateral_balance
-                .checked_sub(collateral_sold)
-                .ok_or(Error::ArithmeticError)?;
-            self.total_collateral_balance = self
-                .total_collateral_balance
-                .checked_sub(collateral_sold)
-                .ok_or(Error::ArithmeticError)?;
-
-            self.save_vault(owner, vault_id, &vault)?;
-            self.liquidation_auctions.remove((owner, vault_id));
-
             self.env().emit_event(VaultLiquidated {
                 owner,
                 vault_id,
@@ -931,67 +1067,66 @@ mod vault {
             Ok(())
         }
 
-        /// Retrieves the vault details for a given owner and vault ID.
+        // ── Read methods ────────────────────────────────────────────────
+
         #[ink(message)]
         pub fn get_vault(&self, owner: AccountId, vault_id: u32) -> Option<Vault> {
             self.vaults.get((owner, vault_id))
         }
 
-        /// Returns the account ID of the deployed ERC-20 token contract.
         #[ink(message)]
         pub fn get_token_address(&self) -> AccountId {
             self.token.to_account_id()
         }
 
-        /// Returns the account ID of the deployed auction contract.
         #[ink(message)]
         pub fn get_auction_address(&self) -> AccountId {
             self.auction.to_account_id()
         }
 
-        /// Returns the account ID of the oracle contract.
         #[ink(message)]
         pub fn get_oracle_address(&self) -> AccountId {
             self.oracle.to_account_id()
         }
 
-        /// Returns the current governance account.
         #[ink(message)]
         pub fn governance(&self) -> AccountId {
             self.governance
         }
 
-        /// Returns the current treasury (fee recipient) account.
         #[ink(message)]
         pub fn treasury(&self) -> AccountId {
             self.treasury
         }
 
-        /// Returns the current platform (pause-capable operator) account.
         #[ink(message)]
         pub fn platform(&self) -> AccountId {
             self.platform
         }
 
-        /// Returns whether the contract is paused by governance.
         #[ink(message)]
         pub fn paused(&self) -> bool {
             self.paused
         }
 
-        /// Returns the current contract parameters (collateral ratio, liquidation ratio, interest rate, etc.) in the external config format.
         #[ink(message)]
-        pub fn get_contract_params(&self) -> VaultContractParamsConfig {
-            Self::contract_params_to_config(self.params)
+        pub fn alpha_price_netuid(&self) -> u16 {
+            self.alpha_price_netuid
         }
 
-        /// Returns the currently scheduled parameter update, if any.
         #[ink(message)]
-        pub fn get_pending_contract_params_update(&self) -> Option<PendingContractParamsUpdate> {
-            self.pending_contract_params_update
+        pub fn get_contract_params(&self, netuid: u16) -> VaultContractParamsConfig {
+            Self::contract_params_to_config(self.get_params(netuid))
         }
 
-        /// Returns the collateral balance for a vault, or None if the vault does not exist.
+        #[ink(message)]
+        pub fn get_pending_contract_params_update(
+            &self,
+            netuid: u16,
+        ) -> Option<PendingContractParamsUpdate> {
+            self.pending_contract_params_updates.get(netuid)
+        }
+
         #[ink(message)]
         pub fn get_vault_collateral_balance(
             &self,
@@ -1003,19 +1138,16 @@ mod vault {
                 .map(|v| v.collateral_balance)
         }
 
-        /// Returns the total collateral balance across all vaults.
         #[ink(message)]
         pub fn get_total_collateral_balance(&self) -> Balance {
             self.total_collateral_balance
         }
 
-        /// Returns the total borrowed debt across all vaults owned by an account.
         #[ink(message)]
         pub fn get_total_debt(&self, owner: AccountId) -> Balance {
             self.owner_total_debt.get(owner).unwrap_or_default()
         }
 
-        /// Calculates the token value of a vault's collateral based on the current price ratio.
         #[ink(message)]
         pub fn get_vault_collateral_value(
             &self,
@@ -1026,42 +1158,37 @@ mod vault {
                 .vaults
                 .get((owner, vault_id))
                 .ok_or(Error::VaultNotFound)?;
-            let price = self.current_collateral_price()?;
+            let price = self.current_collateral_price(vault.netuid)?;
             Self::collateral_value(price, vault.collateral_balance)
         }
 
-        /// Returns the maximum token amount that can be borrowed against a vault's collateral.
         #[ink(message)]
         pub fn get_max_borrow(&self, owner: AccountId, vault_id: u32) -> Result<Balance> {
             let vault = self
                 .vaults
                 .get((owner, vault_id))
                 .ok_or(Error::VaultNotFound)?;
-            let price = self.current_collateral_price()?;
-            let max = self.max_borrow_allowed(price, vault.collateral_balance)?;
+            let price = self.current_collateral_price(vault.netuid)?;
+            let max = self.max_borrow_allowed(vault.netuid, price, vault.collateral_balance)?;
 
             Ok(max)
         }
 
-        /// Returns the auction ID for an active liquidation of a vault, or None if there is no active liquidation.
         #[ink(message)]
         pub fn get_liquidation_auction_id(&self, owner: AccountId, vault_id: u32) -> Option<u32> {
             self.liquidation_auctions.get((owner, vault_id))
         }
 
-        /// Returns the total number of vaults created across all owners.
         #[ink(message)]
         pub fn get_total_vaults_count(&self) -> u32 {
             self.vault_keys.len()
         }
 
-        /// Returns the number of vaults owned by a specific account.
         #[ink(message)]
         pub fn get_vaults_count(&self, owner: AccountId) -> u32 {
             self.vault_count.get(owner).unwrap_or_default()
         }
 
-        /// Returns a paginated list of vaults owned by a specific account.
         #[ink(message)]
         pub fn get_vaults(&self, owner: AccountId, page: u32) -> Result<Vec<Vault>> {
             let total_owner_vaults = self.vault_count.get(owner).unwrap_or_default();
@@ -1080,7 +1207,6 @@ mod vault {
             Ok(vaults)
         }
 
-        /// Returns a paginated list of all vaults across all owners.
         #[ink(message)]
         pub fn get_all_vaults(&self, page: u32) -> Result<Vec<Vault>> {
             let total_vaults = self.vault_keys.len();
@@ -1100,7 +1226,75 @@ mod vault {
             Ok(vaults)
         }
 
-        /// Verifies an oracle price reading is present, non-zero, and not older than `max_oracle_age_ms`.
+        // ── Internal helpers ────────────────────────────────────────────
+
+        /// Queries the chain extension for the alpha stake held by this contract as coldkey
+        /// for the vault's configured hotkey on the given subnet. Returns only the
+        /// available (unlocked) portion.
+        fn get_contract_stake(&self, netuid: u16) -> Result<Balance> {
+            let contract_addr = self.env().account_id();
+            let info = self
+                .env()
+                .extension()
+                .get_stake_info_for_hotkey_coldkey_netuid(
+                    self.vault_hotkey,
+                    contract_addr,
+                    netuid,
+                )
+                .map_err(|_| Error::ChainExtensionFailed)?
+                .ok_or(Error::NoAlphaStakeFound)?;
+
+            let stake: u64 = info.stake.into();
+            let locked: u64 = info.locked.into();
+            let available = stake.checked_sub(locked).ok_or(Error::ArithmeticError)?;
+
+            if available == 0 {
+                return Err(Error::NoAlphaStakeFound);
+            }
+            Ok(available)
+        }
+
+        /// Returns the active params for a netuid, falling back to defaults when none configured.
+        fn get_params(&self, netuid: u16) -> VaultContractParams {
+            self.netuid_params
+                .get(netuid)
+                .unwrap_or_else(Self::default_contract_params)
+        }
+
+        /// Returns the collateral price for a given subnet: TUSDT per alpha unit.
+        ///
+        /// Combines two sources:
+        /// 1. TUSDT/TAO from the oracle contract
+        /// 2. Alpha/TAO from the chain extension (`get_alpha_price`, scaled by 1e9)
+        ///
+        /// Formula: `tusdt_per_alpha = tusdt_per_tao × (alpha_price_rao / 1_000_000_000)`
+        pub(crate) fn current_collateral_price(&self, netuid: u16) -> Result<Ratio> {
+            // TUSDT per TAO from oracle
+            let price_data = Self::validate_price_data(
+                self.oracle.get_latest_price(),
+                self.env().block_timestamp(),
+                self.get_params(netuid).max_oracle_age_ms,
+            )?;
+            let tusdt_per_tao = price_data.price;
+
+            // Alpha per TAO from chain extension (RAO per alpha, 1 TAO = 1e9 RAO)
+            let alpha_price_rao = self
+                .env()
+                .extension()
+                .get_alpha_price(netuid)
+                .map_err(|_| Error::ChainExtensionFailed)?;
+
+            // Convert: alpha_to_tao = alpha_price_rao / 1_000_000_000
+            let alpha_to_tao = Ratio::from_inner(u128::from(alpha_price_rao))
+                .checked_div_int(1_000_000_000u128)
+                .ok_or(Error::ArithmeticError)?;
+
+            // TUSDT per alpha = TUSDT per TAO × (alpha per TAO)
+            tusdt_per_tao
+                .checked_mul(alpha_to_tao)
+                .ok_or(Error::ArithmeticError)
+        }
+
         pub(crate) fn validate_price_data(
             price_data: Option<PriceData>,
             now: u64,
@@ -1119,17 +1313,6 @@ mod vault {
             Ok(price_data)
         }
 
-        /// Returns the latest validated collateral price (raw tUSDT units per raw collateral unit) from the oracle.
-        pub(crate) fn current_collateral_price(&self) -> Result<Ratio> {
-            let price_data = Self::validate_price_data(
-                self.oracle.get_latest_price(),
-                self.env().block_timestamp(),
-                self.params.max_oracle_age_ms,
-            )?;
-            Ok(price_data.price)
-        }
-
-        /// Updates the per-owner aggregate debt accumulator to reflect a vault's debt moving from one balance to another.
         pub(crate) fn sync_owner_total_debt(
             &mut self,
             owner: AccountId,
@@ -1146,7 +1329,6 @@ mod vault {
             Ok(())
         }
 
-        /// Applies a debt payment, splitting it between outstanding interest (paid first) and principal.
         pub(crate) fn apply_debt_payment(
             vault: &mut Vault,
             payment_amount: Balance,
@@ -1176,7 +1358,6 @@ mod vault {
             })
         }
 
-        /// Returns the unpaid interest on a vault as `debt_balance - borrowed_token_balance`.
         pub(crate) fn outstanding_interest(vault: &Vault) -> Result<Balance> {
             vault
                 .debt_balance
@@ -1184,16 +1365,18 @@ mod vault {
                 .ok_or(Error::ArithmeticError)
         }
 
-        /// Computes the transaction fee for the given amount based on the configured fee ratio.
-        pub(crate) fn calculate_transaction_fee(&self, amount: Balance) -> Result<Balance> {
-            self.params
+        pub(crate) fn calculate_transaction_fee(
+            &self,
+            netuid: u16,
+            amount: Balance,
+        ) -> Result<Balance> {
+            self.get_params(netuid)
                 .transaction_fee
                 .checked_mul_value(amount.into())
                 .and_then(|fee| Balance::try_from(fee).ok())
                 .ok_or(Error::ArithmeticError)
         }
 
-        /// Reverts with `InsufficientTokenBalance` if `owner` holds less tUSDT than `required_balance`.
         #[inline]
         pub(crate) fn ensure_token_balance_at_least(
             &self,
@@ -1206,7 +1389,6 @@ mod vault {
             Ok(())
         }
 
-        /// Sends the given native fee amount to the treasury account; no-op if `fee == 0`.
         #[inline]
         pub(crate) fn transfer_transaction_fee_to_treasury(&mut self, fee: Balance) -> Result<()> {
             if fee == 0 {
@@ -1218,7 +1400,6 @@ mod vault {
             Ok(())
         }
 
-        /// Reverts with `NotGovernance` if caller is not the governance account.
         #[inline]
         fn ensure_governance(&self) -> Result<()> {
             if self.env().caller() != self.governance {
@@ -1227,7 +1408,6 @@ mod vault {
             Ok(())
         }
 
-        /// Reverts with `NotGovernanceOrPlatform` if caller is neither governance nor platform.
         #[inline]
         fn ensure_governance_or_platform(&self) -> Result<()> {
             let caller = self.env().caller();
@@ -1237,7 +1417,6 @@ mod vault {
             Ok(())
         }
 
-        /// Reverts with `ContractPaused` if the contract is currently paused.
         #[inline]
         fn ensure_not_paused(&self) -> Result<()> {
             if self.paused {
@@ -1246,7 +1425,14 @@ mod vault {
             Ok(())
         }
 
-        /// Propagates governance changes to the child auction and oracle contracts.
+        #[inline]
+        fn ensure_approved_netuid(&self, netuid: u16) -> Result<()> {
+            if self.approved_netuids.get(netuid).is_none() {
+                return Err(Error::UnapprovedNetuid);
+            }
+            Ok(())
+        }
+
         #[cfg(not(test))]
         fn sync_child_governance(&mut self, new_governance: AccountId) -> Result<()> {
             self.auction
@@ -1258,7 +1444,6 @@ mod vault {
             Ok(())
         }
 
-        /// Test stub for `sync_child_governance` since child contracts are not instantiated in unit tests.
         #[cfg(test)]
         fn sync_child_governance(&mut self, _new_governance: AccountId) -> Result<()> {
             Ok(())
@@ -1266,7 +1451,7 @@ mod vault {
     }
 
     #[cfg(test)]
-    impl TusdtVault {
+    impl TusdtVaultAlpha {
         pub(crate) fn new_for_test(governance: AccountId) -> Self {
             use ink::env::call::FromAccountId;
 
@@ -1281,13 +1466,18 @@ mod vault {
                 auction: TusdtAuctionRef::from_account_id(accounts.django),
                 oracle: TusdtOracleRef::from_account_id(accounts.eve),
                 total_collateral_balance: 0,
-                params: Self::default_contract_params(),
-                pending_contract_params_update: None,
+                vault_hotkey: accounts.bob,
+                alpha_price_netuid: 0,
+                approved_netuids: Mapping::default(),
+                netuid_total_collateral: Mapping::default(),
+                netuid_params: Mapping::default(),
+                pending_contract_params_updates: Mapping::default(),
                 vaults: Mapping::default(),
                 owner_total_debt: Mapping::default(),
                 vault_count: Mapping::default(),
                 vault_keys: StorageVec::default(),
                 liquidation_auctions: Mapping::default(),
+                pending_deposits: Mapping::default(),
             }
         }
 

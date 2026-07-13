@@ -6,10 +6,11 @@ pub use self::tusdt::{TusdtErc20, TusdtErc20Ref};
 mod tusdt {
     use ink::storage::Mapping;
 
-    /// Storage for the tUSDT ERC20-style stablecoin: controller, supply, balances, and allowances.
+    /// Storage for the tUSDT ERC20-style stablecoin: controller, minters, supply, balances, and allowances.
     #[ink(storage)]
     pub struct TusdtErc20 {
         controller: AccountId,
+        minters: Mapping<AccountId, ()>,
         total_supply: Balance,
         balances: Mapping<AccountId, Balance>,
         allowances: Mapping<(AccountId, AccountId), Balance>,
@@ -43,7 +44,9 @@ mod tusdt {
         InsufficientBalance,
         /// Caller's allowance from the owner is below the requested amount.
         InsufficientAllowance,
-        /// Caller is not the configured controller (vault) account.
+        /// Caller is not an authorized minter account.
+        NotMinter,
+        /// Caller is not the configured controller account.
         NotController,
         /// An arithmetic overflow or underflow occurred.
         ArithmeticError,
@@ -52,11 +55,15 @@ mod tusdt {
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtErc20 {
-        /// Initializes the token contract with the specified controller account.
+        /// Initializes the token contract with the specified controller account. The controller
+        /// is also registered as the initial minter.
         #[ink(constructor)]
         pub fn new(controller: AccountId) -> Self {
+            let mut minters = Mapping::default();
+            minters.insert(controller, &());
             Self {
                 controller,
+                minters,
                 total_supply: 0,
                 balances: Mapping::default(),
                 allowances: Default::default(),
@@ -67,6 +74,40 @@ mod tusdt {
         #[ink(message)]
         pub fn controller(&self) -> AccountId {
             self.controller
+        }
+
+        /// Transfers the controller role to a new account. Callable only once by the current
+        /// controller. Removes the old controller from minters and adds the new one.
+        #[ink(message)]
+        pub fn set_controller(&mut self, new_controller: AccountId) -> Result<()> {
+            let old_controller = self.controller;
+            self.ensure_controller()?;
+            self.minters.remove(old_controller);
+            self.minters.insert(new_controller, &());
+            self.controller = new_controller;
+            Ok(())
+        }
+
+        /// Adds an account to the authorized minters set. Only callable by the controller.
+        #[ink(message)]
+        pub fn add_minter(&mut self, minter: AccountId) -> Result<()> {
+            self.ensure_controller()?;
+            self.minters.insert(minter, &());
+            Ok(())
+        }
+
+        /// Removes an account from the authorized minters set. Only callable by the controller.
+        #[ink(message)]
+        pub fn remove_minter(&mut self, minter: AccountId) -> Result<()> {
+            self.ensure_controller()?;
+            self.minters.remove(minter);
+            Ok(())
+        }
+
+        /// Returns `true` if the given account is an authorized minter.
+        #[ink(message)]
+        pub fn is_minter(&self, account: AccountId) -> bool {
+            self.minters.get(account).is_some()
         }
 
         /// Returns the total supply of tokens in circulation.
@@ -110,11 +151,20 @@ mod tusdt {
             });
         }
 
-        /// Reverts with `NotController` if the caller is not the configured controller (vault).
+        /// Reverts with `NotController` if the caller is not the configured controller.
         #[inline]
         fn ensure_controller(&self) -> Result<()> {
             if self.env().caller() != self.controller {
                 return Err(Error::NotController);
+            }
+            Ok(())
+        }
+
+        /// Reverts with `NotMinter` if the caller is not in the minters set.
+        #[inline]
+        fn ensure_minter(&self) -> Result<()> {
+            if self.minters.get(self.env().caller()).is_none() {
+                return Err(Error::NotMinter);
             }
             Ok(())
         }
@@ -126,10 +176,10 @@ mod tusdt {
             self.transfer_from_to(&from, &to, value)
         }
 
-        /// Mints new tokens and adds them to an account's balance; only callable by controller.
+        /// Mints new tokens and adds them to an account's balance; only callable by authorized minters.
         #[ink(message)]
         pub fn mint(&mut self, to: AccountId, value: Balance) -> Result<()> {
-            self.ensure_controller()?;
+            self.ensure_minter()?;
             let to_balance = self.balance_of_impl(&to);
 
             self.total_supply = self
@@ -151,10 +201,10 @@ mod tusdt {
             Ok(())
         }
 
-        /// Burns tokens from an account, reducing the total supply; only callable by controller.
+        /// Burns tokens from an account, reducing the total supply; only callable by authorized minters.
         #[ink(message)]
         pub fn burn(&mut self, from: AccountId, value: Balance) -> Result<()> {
-            self.ensure_controller()?;
+            self.ensure_minter()?;
             let from_balance = self.balance_of_impl(&from);
             if from_balance < value {
                 return Err(Error::InsufficientBalance);

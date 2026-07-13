@@ -113,13 +113,13 @@ fn allowance_must_not_change_on_failed_transfer() {
 }
 
 #[ink::test]
-fn mint_fails_for_non_controller() {
+fn mint_fails_for_non_minter() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut erc20 = TusdtErc20::new(accounts.alice);
 
     set_caller(accounts.bob);
 
-    assert_eq!(erc20.mint(accounts.bob, 100), Err(Error::NotController));
+    assert_eq!(erc20.mint(accounts.bob, 100), Err(Error::NotMinter));
     assert_eq!(erc20.total_supply(), 0);
     assert_eq!(erc20.balance_of(accounts.bob), 0);
 }
@@ -136,14 +136,14 @@ fn burn_works_for_controller() {
 }
 
 #[ink::test]
-fn burn_fails_for_non_controller() {
+fn burn_fails_for_non_minter() {
     let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
     let mut erc20 = TusdtErc20::new(accounts.alice);
     assert_eq!(erc20.mint(accounts.bob, 100), Ok(()));
 
     set_caller(accounts.bob);
 
-    assert_eq!(erc20.burn(accounts.bob, 10), Err(Error::NotController));
+    assert_eq!(erc20.burn(accounts.bob, 10), Err(Error::NotMinter));
     assert_eq!(erc20.total_supply(), 100);
     assert_eq!(erc20.balance_of(accounts.bob), 100);
 }

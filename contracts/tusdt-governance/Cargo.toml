@@ -10,7 +10,7 @@ tusdt-env = { path = "../../env", default-features = false }
 tusdt-treasury = { path = "../tusdt-treasury", default-features = false, features = [
     "ink-as-dependency",
 ] }
-tusdt-vault = { path = "../tusdt-vault", default-features = false, features = [
+tusdt-vault-alpha = { path = "../tusdt-vault-alpha", default-features = false, features = [
     "ink-as-dependency",
 ] }
 tusdt-auction = { path = "../tusdt-auction", default-features = false, features = [
@@ -37,7 +37,7 @@ std = [
     "ink/std",
     "tusdt-env/std",
     "tusdt-treasury/std",
-    "tusdt-vault/std",
+    "tusdt-vault-alpha/std",
     "tusdt-auction/std",
     "tusdt-oracle/std",
     "tusdt-election/std",

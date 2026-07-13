@@ -1,0 +1,30 @@
+[package]
+name = "tusdt-vault-alpha"
+version = "0.1.0"
+edition = "2021"
+authors = ["tensorusd admin@tensorusd.com"]
+license = "MIT-0"
+
+[dependencies]
+ink = { workspace = true }
+tusdt-env = { path = "../../env", default-features = false }
+tusdt-primitives = { path = "../../primitives", default-features = false }
+tusdt-erc20 = { path = "../tusdt-erc20", default-features = false, features = ["ink-as-dependency"] }
+tusdt-auction = { path = "../tusdt-auction", default-features = false, features = ["ink-as-dependency"] }
+tusdt-oracle = { path = "../tusdt-oracle", default-features = false, features = ["ink-as-dependency"] }
+
+[lib]
+path = "lib.rs"
+
+[features]
+default = ["std"]
+std = [
+    "ink/std",
+    "tusdt-env/std",
+    "tusdt-primitives/std",
+    "tusdt-erc20/std",
+    "tusdt-auction/std",
+    "tusdt-oracle/std",
+]
+ink-as-dependency = []
+e2e-tests = []
