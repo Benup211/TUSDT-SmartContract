@@ -7030,6 +7030,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tusdt-otc"
+version = "0.1.0"
+dependencies = [
+ "ink",
+ "tusdt-env",
+ "tusdt-erc20",
+ "tusdt-primitives",
+]
+
+[[package]]
 name = "tusdt-primitives"
 version = "0.1.0"
 dependencies = [

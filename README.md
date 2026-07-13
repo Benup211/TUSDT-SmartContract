@@ -6,7 +6,8 @@ liquidation auctions, plus on-chain governance and a treasury that books protoco
 The contracts split into two layers:
 
 - **Protocol** — `tusdt-erc20` (token, multi-minter), `tusdt-vault-alpha` (CDP borrowing/liquidation
-  backed by subnet alpha), `tusdt-auction` (liquidation auctions), `tusdt-oracle` (collateral pricing).
+  backed by subnet alpha), `tusdt-auction` (ascending-bid liquidation auctions), `tusdt-oracle`
+  (collateral pricing), `tusdt-otc` (OTC swap marketplace for TUSDT/Native TAO against subnet alpha).
   The vault owns the token/auction/oracle instances it creates.
 - **Governance & treasury** — `tusdt-governance` (token-holder proposals plus a maintainer/council
   authority that steers the protocol contracts) and `tusdt-treasury` (per-fund accounting for fees,
@@ -43,6 +44,7 @@ cargo contract build --manifest-path contracts/tusdt-vault-alpha/Cargo.toml --re
 cargo contract build --manifest-path contracts/tusdt-treasury/Cargo.toml --release
 cargo contract build --manifest-path contracts/tusdt-governance/Cargo.toml --release
 cargo contract build --manifest-path contracts/tusdt-election/Cargo.toml --release
+cargo contract build --manifest-path contracts/tusdt-otc/Cargo.toml --release
 ```
 
 Artifacts are produced in `target/ink/`.
@@ -275,6 +277,51 @@ incoming balance across the funds; `release(fund, token_kind, amount, recipient)
 callable **only by governance** (i.e. via an executed Funding proposal). The deployer is the initial
 governance until `set_governance` hands control to the governance contract.
 
+## OTC Swap Marketplace
+
+The `tusdt-otc` contract enables permissionless over-the-counter swaps of TUSDT (PSP22) or native TAO
+against subnet alpha using a unified order model.
+
+### Order model
+
+A single `Order` type with a `side` field:
+- **Sell** — maker provides alpha, wants TUSDT or native TAO in return
+- **Buy** — maker provides TUSDT or native TAO, wants alpha in return
+
+Orders are priced via `price_bps` relative to the on-chain alpha price (`get_alpha_price`):
+- `10_000` = market price, `10_500` = 5% above, `9_500` = 5% below
+
+Each order tracks `status`: `Active` → `Fulfilled` or `Cancelled`.
+
+### Coldkey model (no proxy)
+
+Alpha sellers transfer stake to the contract (which becomes the coldkey) via a two-step flow:
+1. `deposit_alpha(amount, netuid)` — register intent
+2. Transfer alpha stake to the contract via subtensor `transfer_stake` extrinsic
+3. `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` — creates the order
+
+Buy orders using TUSDT require the maker to `approve` the contract first. Buy orders using native
+TAO send TAO with the `create_order` call.
+
+### Fulfillment
+
+Anyone (except the maker) can call `fulfill_order(order_id)` to execute a swap:
+- **Sell orders**: taker sends counter-collateral, receives alpha
+- **Buy orders**: taker deposits alpha (same two-step flow), receives the maker's locked collateral
+
+Fees are deducted from the maker's side at fulfillment time, configurable by the owner.
+
+### Key methods
+
+| Method | Description |
+|--------|-------------|
+| `deposit_alpha(amount, netuid)` | Register alpha deposit intent |
+| `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` | Create order |
+| `fulfill_order(order_id)` | Execute swap (permissionless) |
+| `cancel_order(order_id)` | Cancel own order, return assets |
+| `update_fee_rate(bps)` | Owner: change fee rate |
+| `pause()` / `unpause()` | Owner: emergency control |
+
 ## Useful Read Methods
 
 - Vault: `get_vault`, `get_total_debt`, `get_contract_params(netuid)`, `is_approved_netuid(netuid)`, `alpha_price_netuid()`, `get_oracle_address`, `get_vaults`, `get_all_vaults`
@@ -285,6 +332,7 @@ governance until `set_governance` hands control to the governance contract.
 - Token: `balance_of`, `allowance`, `total_supply`
 - Governance: `maintainer`, `election`, `netuid`, `council`, `is_council`, `params`, `current_epoch`, `get_snapshot`, `quorum`, `proposal_count`, `get_proposal`, `has_voted`
 - Treasury: `governance`, `token`, `fund_balance_tusdt`, `fund_balance_native`
+- OTC: `get_order(order_id)`, `get_next_order_id()`, `owner()`, `is_paused()`, `fee_rate_bps()`
 
 ## Notes
 
@@ -296,3 +344,7 @@ governance until `set_governance` hands control to the governance contract.
 - Protocol fees accrue to `tusdt-treasury`; only `tusdt-governance` can release them.
 - After wiring, the vault/auction/oracle are governed by `tusdt-governance`; the maintainer and
   council act through its forwarders rather than calling those contracts directly.
+- `tusdt-otc` uses the coldkey model — no proxy registration needed. Alpha sellers transfer stake
+  to the contract via `transfer_stake`, and the contract manages custody directly.
+- OTC orders use `price_bps` relative to the chain extension's `get_alpha_price(netuid)` for
+  market-relative pricing evaluated at execution time.
