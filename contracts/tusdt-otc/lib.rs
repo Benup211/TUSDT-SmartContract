@@ -66,6 +66,9 @@ mod otc {
         next_order_id: u64,
         /// Two-step deposit intent: (caller, netuid) → alpha amount.
         pending_deposits: Mapping<(AccountId, u16), Balance>,
+        /// Per-netuid total alpha reserved by active Sell orders. Used to compute
+        /// excess alpha (actual stake minus reserved) for `claim_excess_alpha`.
+        netuid_total_reserved: Mapping<u16, Balance>,
     }
 
     // ── Events ────────────────────────────────────────────────────────
@@ -102,6 +105,16 @@ mod otc {
 
     #[ink(event)]
     pub struct FeeRateUpdated { previous_bps: u32, new_bps: u32 }
+
+    #[ink(event)]
+    pub struct ExcessAlphaClaimed {
+        #[ink(topic)]
+        netuid: u16,
+        excess_alpha: Balance,
+        tao_received: Balance,
+        #[ink(topic)]
+        recipient: AccountId,
+    }
 
     #[ink(event)]
     pub struct Paused {}
@@ -149,6 +162,7 @@ mod otc {
                 orders: Mapping::default(),
                 next_order_id: 0,
                 pending_deposits: Mapping::default(),
+                netuid_total_reserved: Mapping::default(),
             }
         }
 
@@ -217,6 +231,14 @@ mod otc {
                     if remainder > 0 {
                         self.pending_deposits.insert((caller, netuid), &remainder);
                     }
+                    // Track this Sell order's alpha as reserved.
+                    let current_reserved = self.netuid_total_reserved.get(netuid).unwrap_or_default();
+                    self.netuid_total_reserved.insert(
+                        netuid,
+                        &current_reserved
+                            .checked_add(alpha_amount)
+                            .ok_or(Error::ArithmeticError)?,
+                    );
                 }
                 OrderSide::Buy => {
                     // Pull collateral from maker now so the order is backed.
@@ -298,6 +320,14 @@ mod otc {
                     // Send alpha to taker; taker's counter-collateral goes to maker (minus fee).
                     self.transfer_alpha_to(order.netuid, taker, order.alpha_amount)?;
                     self.send_counter_collateral(taker, order.counter_collateral, order.maker, counter_amount, fee)?;
+                    // Release reserved alpha tracking.
+                    let current_reserved = self.netuid_total_reserved.get(order.netuid).unwrap_or_default();
+                    self.netuid_total_reserved.insert(
+                        order.netuid,
+                        &current_reserved
+                            .checked_sub(order.alpha_amount)
+                            .ok_or(Error::ArithmeticError)?,
+                    );
                 }
                 OrderSide::Buy => {
                     // Taker must have called deposit_alpha + transferred stake to
@@ -365,6 +395,14 @@ mod otc {
                     self.return_collateral(order.maker, order.collateral, locked)?;
                 }
                 OrderSide::Sell => {
+                    // Release reserved alpha tracking before returning stake.
+                    let current_reserved = self.netuid_total_reserved.get(order.netuid).unwrap_or_default();
+                    self.netuid_total_reserved.insert(
+                        order.netuid,
+                        &current_reserved
+                            .checked_sub(order.alpha_amount)
+                            .ok_or(Error::ArithmeticError)?,
+                    );
                     // Return alpha stake back to maker.
                     self.transfer_alpha_to(order.netuid, order.maker, order.alpha_amount)?;
                 }
@@ -410,6 +448,54 @@ mod otc {
             Ok(())
         }
 
+        /// Claims excess alpha staking rewards on a subnet by unstaking them to native
+        /// TAO and transferring the TAO to the specified recipient. Owner only.
+        ///
+        /// Excess = actual contract stake on the subnet minus total alpha reserved by
+        /// active Sell orders.  If there is no excess, this is a no-op (returns Ok).
+        #[ink(message)]
+        pub fn claim_excess_alpha(&mut self, netuid: u16, recipient: AccountId) -> Result<()> {
+            self.ensure_owner()?;
+
+            let total_reserved = self.netuid_total_reserved.get(netuid).unwrap_or_default();
+            let current_stake = self.get_contract_stake(netuid)?;
+
+            if current_stake <= total_reserved {
+                return Ok(());
+            }
+
+            let excess = current_stake
+                .checked_sub(total_reserved)
+                .ok_or(Error::ArithmeticError)?;
+
+            let balance_before = self.env().balance();
+
+            self.env()
+                .extension()
+                .remove_stake(self.hotkey, netuid, excess)
+                .map_err(|_| Error::ChainExtensionFailed)?;
+
+            let balance_after = self.env().balance();
+            let tao_received = balance_after
+                .checked_sub(balance_before)
+                .ok_or(Error::ArithmeticError)?;
+
+            if tao_received > 0 {
+                self.env()
+                    .transfer(recipient, tao_received)
+                    .map_err(|_| Error::TransferFailed)?;
+            }
+
+            self.env().emit_event(ExcessAlphaClaimed {
+                netuid,
+                excess_alpha: excess,
+                tao_received,
+                recipient,
+            });
+
+            Ok(())
+        }
+
         // ── Queries ──────────────────────────────────────────────────
 
         #[ink(message)]
@@ -434,6 +520,11 @@ mod otc {
         #[ink(message)]
         pub fn fee_rate_bps(&self) -> u32 {
             self.fee_rate.to_basis_points().unwrap_or(0)
+        }
+
+        #[ink(message)]
+        pub fn get_reserved_alpha(&self, netuid: u16) -> Balance {
+            self.netuid_total_reserved.get(netuid).unwrap_or_default()
         }
 
         // ── Internals ────────────────────────────────────────────────
@@ -615,6 +706,7 @@ mod otc {
                 orders: Mapping::default(),
                 next_order_id: 0,
                 pending_deposits: Mapping::default(),
+                netuid_total_reserved: Mapping::default(),
             }
         }
     }

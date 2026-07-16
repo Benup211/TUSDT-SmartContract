@@ -469,6 +469,13 @@ mod governance {
             self.forward_vault_unpause()
         }
 
+        /// Claims excess alpha on a subnet from the vault and sends the TAO to treasury.
+        /// Maintainer-only.
+        #[ink(message)]
+        pub fn vault_claim_excess_alpha(&mut self, netuid: u16) -> Result<()> {
+            self.forward_vault_claim_excess_alpha(netuid)
+        }
+
         /// Pauses the vault; council-only (operational/emergency halt).
         #[ink(message)]
         pub fn vault_pause(&mut self) -> Result<()> {
