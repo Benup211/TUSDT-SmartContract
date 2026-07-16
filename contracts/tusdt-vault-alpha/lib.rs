@@ -255,6 +255,14 @@ mod vault {
     }
 
     #[ink(event)]
+    pub struct ExcessAlphaClaimed {
+        #[ink(topic)]
+        netuid: u16,
+        excess_alpha: Balance,
+        tao_received: Balance,
+    }
+
+    #[ink(event)]
     pub struct LiquidationAuctionCreated {
         #[ink(topic)]
         owner: AccountId,
@@ -567,6 +575,64 @@ mod vault {
             self.env().emit_event(SurplusTusdtClaimed {
                 recipient: self.treasury,
                 amount,
+            });
+
+            Ok(())
+        }
+
+        /// Claims excess alpha staking rewards on a subnet by unstaking them to native
+        /// TAO and transferring the TAO to the treasury. Governance only.
+        ///
+        /// Excess = actual contract stake on the netuid minus total vault collateral on
+        /// that netuid (`netuid_total_collateral`).  If there is no excess, this is a
+        /// no-op (returns Ok).
+        #[ink(message)]
+        pub fn claim_excess_alpha(&mut self, netuid: u16) -> Result<()> {
+            self.ensure_governance()?;
+
+            // Read actual available stake.  If none exists on this netuid, nothing to claim.
+            let current_stake = match self.get_contract_stake(netuid) {
+                Ok(s) => s,
+                Err(Error::NoAlphaStakeFound) => return Ok(()),
+                Err(e) => return Err(e),
+            };
+
+            let netuid_total = self.netuid_total_collateral.get(netuid).unwrap_or_default();
+
+            if current_stake <= netuid_total {
+                return Ok(());
+            }
+
+            let excess = current_stake
+                .checked_sub(netuid_total)
+                .ok_or(Error::ArithmeticError)?;
+
+            // Snapshot native TAO balance before unstaking.
+            let balance_before = self.env().balance();
+
+            // Unstake excess alpha to native TAO via chain extension.
+            self.env()
+                .extension()
+                .remove_stake(self.vault_hotkey, netuid, excess)
+                .map_err(|_| Error::ChainExtensionFailed)?;
+
+            // Read the actual TAO received from the balance change.
+            let balance_after = self.env().balance();
+            let tao_received = balance_after
+                .checked_sub(balance_before)
+                .ok_or(Error::ArithmeticError)?;
+
+            // Transfer TAO to treasury.
+            if tao_received > 0 {
+                self.env()
+                    .transfer(self.treasury, tao_received)
+                    .map_err(|_| Error::TransferFailed)?;
+            }
+
+            self.env().emit_event(ExcessAlphaClaimed {
+                netuid,
+                excess_alpha: excess,
+                tao_received,
             });
 
             Ok(())

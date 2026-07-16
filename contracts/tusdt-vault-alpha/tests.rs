@@ -1,6 +1,6 @@
 use super::vault::*;
 use ink::env::test;
-use tusdt_env::{StakeAvailability, StakeInfo};
+use tusdt_env::StakeInfo;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -93,6 +93,13 @@ impl test::ChainExtension for MockExtension {
 fn register_mock(stake: u64) {
     test::register_chain_extension(MockExtension {
         stake: Some(stake),
+        should_fail: false,
+    });
+}
+
+fn register_mock_no_stake() {
+    test::register_chain_extension(MockExtension {
+        stake: None,
         should_fail: false,
     });
 }
@@ -348,4 +355,50 @@ fn add_alpha_collateral_rejects_if_no_new_stake() {
     set_caller(accounts.alice);
     let result = vault.add_alpha_collateral(vault_id);
     assert_eq!(result, Err(Error::InsufficientCollateral));
+}
+
+// ── claim_excess_alpha ───────────────────────────────────────────────
+
+#[ink::test]
+fn governance_can_claim_excess_alpha() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    create_test_vault(&mut vault, accounts.alice, 10_000_000);
+
+    // Mock reports 15M stake — 5M excess over netuid_total_collateral (10M)
+    register_mock(15_000_000);
+    set_caller(accounts.alice); // governance
+    vault.claim_excess_alpha(1).unwrap();
+}
+
+#[ink::test]
+fn non_governance_cannot_claim_excess_alpha() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    create_test_vault(&mut vault, accounts.alice, 10_000_000);
+
+    register_mock(15_000_000);
+    set_caller(accounts.bob); // not governance
+    let result = vault.claim_excess_alpha(1);
+    assert_eq!(result, Err(Error::NotGovernance));
+}
+
+#[ink::test]
+fn claim_excess_alpha_noop_when_no_excess() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    create_test_vault(&mut vault, accounts.alice, 10_000_000);
+
+    // Mock still reports 10M — no excess
+    register_mock(10_000_000);
+    set_caller(accounts.alice);
+    vault.claim_excess_alpha(1).unwrap(); // Should succeed as no-op
+}
+
+#[ink::test]
+fn claim_excess_alpha_noop_when_no_stake_on_netuid() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    create_test_vault(&mut vault, accounts.alice, 10_000_000);
+
+    // Mock returns None for stake info — NoAlphaStakeFound → no-op
+    register_mock_no_stake();
+    set_caller(accounts.alice);
+    vault.claim_excess_alpha(1).unwrap(); // Should succeed as no-op
 }

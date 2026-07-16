@@ -53,6 +53,13 @@ impl TusdtGovernance {
         self.vault.unpause().map_err(|_| Error::VaultCallFailed)
     }
 
+    pub(crate) fn forward_vault_claim_excess_alpha(&mut self, netuid: u16) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .claim_excess_alpha(netuid)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
     // ----- Vault: council-gated (operational/emergency) -----
 
     pub(crate) fn forward_vault_pause(&mut self) -> Result<()> {

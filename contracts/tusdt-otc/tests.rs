@@ -46,6 +46,7 @@ impl test::ChainExtension for MockExtension {
                 ink::scale::Encode::encode_to(&price, output);
                 0
             }
+            2 => 0,   // remove_stake success
             6 => {
                 if self.transfer_fails { 2 } else { 0 }
             }
@@ -280,4 +281,75 @@ fn probe_order_requires_collateral_amount_not_zero() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     assert!(otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 0).is_err());
+}
+
+// ── Reserved alpha tracking ──────────────────────────────────────────
+
+#[ink::test]
+fn sell_order_increments_reserved_alpha() {
+    let (mut otc, accounts) = setup();
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
+    otc.deposit_alpha(1_000_000, 1).unwrap();
+    register_mock(1_000_000);
+    assert_eq!(otc.get_reserved_alpha(1), 0);
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    assert_eq!(otc.get_reserved_alpha(1), 1_000_000);
+}
+
+#[ink::test]
+fn cancel_sell_order_decrements_reserved_alpha() {
+    let (mut otc, accounts) = setup();
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
+    otc.deposit_alpha(1_000_000, 1).unwrap();
+    register_mock(1_000_000);
+    let id = otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    assert_eq!(otc.get_reserved_alpha(1), 1_000_000);
+    otc.cancel_order(id).unwrap();
+    assert_eq!(otc.get_reserved_alpha(1), 0);
+}
+
+#[ink::test]
+fn get_reserved_alpha_returns_zero_for_unknown_netuid() {
+    let (otc, _accounts) = setup();
+    assert_eq!(otc.get_reserved_alpha(99), 0);
+}
+
+// ── claim_excess_alpha ───────────────────────────────────────────────
+
+#[ink::test]
+fn owner_can_claim_excess_alpha() {
+    let (mut otc, accounts) = setup();
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
+    otc.deposit_alpha(1_000_000, 1).unwrap();
+    register_mock(2_000_000);  // stake > reserved → 1_000_000 excess
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    assert_eq!(otc.get_reserved_alpha(1), 1_000_000);
+
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
+    otc.claim_excess_alpha(1, accounts.bob).unwrap();
+}
+
+#[ink::test]
+fn non_owner_cannot_claim_excess_alpha() {
+    let (mut otc, accounts) = setup();
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
+    otc.deposit_alpha(1_000_000, 1).unwrap();
+    register_mock(2_000_000);
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.bob);
+    assert_eq!(otc.claim_excess_alpha(1, accounts.bob), Err(Error::NotOwner));
+}
+
+#[ink::test]
+fn claim_excess_alpha_noop_when_no_excess() {
+    let (mut otc, accounts) = setup();
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
+    otc.deposit_alpha(1_000_000, 1).unwrap();
+    register_mock(1_000_000);  // stake == reserved → no excess
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+
+    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
+    // Should succeed without error (no-op).
+    otc.claim_excess_alpha(1, accounts.bob).unwrap();
 }
