@@ -13,6 +13,7 @@ use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 use tusdt_primitives::Ratio;
 use tusdt_treasury::{Fund, TokenKind};
+use tusdt_vault_alpha::VaultGlobalParamsConfig;
 
 const MS_PER_DAY: u64 = 86_400_000;
 
@@ -732,6 +733,22 @@ fn vault_maintainer_forwarders_reject_non_maintainer() {
     assert_eq!(gov.vault_unpause(), Err(Error::NotMaintainer));
     assert_eq!(
         gov.vault_cancel_contract_params_update(1),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(
+        gov.vault_set_approved_netuid(1, true),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(
+        gov.vault_set_global_params(VaultGlobalParamsConfig {
+            transaction_fee: 30,
+            auction_duration_ms: 3_600_000,
+            max_oracle_age_ms: 1_800_000,
+        }),
+        Err(Error::NotMaintainer)
+    );
+    assert_eq!(
+        gov.vault_cancel_global_params_update(),
         Err(Error::NotMaintainer)
     );
 }

@@ -76,23 +76,22 @@ cd tools
 yarn build:erc20-artifacts
 yarn build:auction-artifacts
 yarn build:oracle-artifacts
-yarn build:vault-alpha-artifacts
+yarn build:vault-artifacts
 yarn erc20:upload
 yarn auction:upload
 yarn oracle:upload
-yarn vault-alpha:upload
-yarn vault-alpha:deploy --token-code-hash <TOKEN_CODE_HASH> --auction-code-hash <AUCTION_CODE_HASH> --oracle-code-hash <ORACLE_CODE_HASH>
+yarn vault:upload
+yarn vault:deploy --token-code-hash <TOKEN_CODE_HASH> --auction-code-hash <AUCTION_CODE_HASH> --oracle-code-hash <ORACLE_CODE_HASH> --treasury-address <SS58> --oracle-netuid <NETUID> --hotkey <SS58>
 yarn test:oracle
 ```
 
 ## Deployment (Recommended Order)
 
 `tusdt-vault-alpha::new` takes a `treasury` address, code hashes for token/auction/oracle,
-`oracle_netuid` (subnet for oracle reporters), `hotkey` (staking hotkey for alpha collateral),
-and `alpha_price_netuid` (subnet whose alpha/TAO price to use for valuation). The vault instantiates
-the token, auction, and oracle internally. Because the vault *creates* the TUSDT token, the token
-address is not known until the vault exists — deploy the treasury after the vault and wire it in
-via `update_treasury`.
+`oracle_netuid` (subnet for oracle reporters), and `hotkey` (staking hotkey for alpha collateral).
+The vault instantiates the token, auction, and oracle internally. Because the vault *creates* the
+TUSDT token, the token address is not known until the vault exists — deploy the treasury after the
+vault and wire it in via `update_treasury`.
 
 1. Upload ERC20 code (`tusdt-erc20`) and capture code hash.
 2. Upload Auction code (`tusdt-auction`) and capture code hash.
@@ -104,7 +103,6 @@ via `update_treasury`.
    - `oracle_code_hash`
    - `oracle_netuid` — subnet whose registered neurons may submit oracle prices
    - `hotkey` — staking hotkey for alpha collateral deposits
-   - `alpha_price_netuid` — subnet whose alpha/TAO price to use for valuation (typically same as oracle_netuid)
 
    The deployer becomes the initial governance of the vault, auction, and oracle.
 5. Read the token / auction / oracle addresses from the vault (`get_token_address`,
@@ -119,8 +117,11 @@ via `update_treasury`.
     - `tusdt-treasury::set_governance(governance)`
     - `tusdt-vault-alpha::update_governance(governance)` — propagates to auction and oracle too.
 12. Seat the council: `tusdt-governance::set_council([c1..c5])`.
-13. Approve target subnets: `tusdt-vault-alpha::set_approved_netuid(N, true)` for each subnet.
-14. Configure per-netuid params: `tusdt-vault-alpha::set_contract_params(N, params)` for each subnet.
+13. Approve target subnets: `tusdt-governance::vault_set_approved_netuid(N, true)` for each subnet.
+14. Configure per-netuid params: `tusdt-governance::vault_set_contract_params(N, params)` for each
+    subnet (24h timelock, then anyone calls `tusdt-vault-alpha::execute_contract_params_update(N)`).
+15. (Optional) Adjust global params: `tusdt-governance::vault_set_global_params(config)` (24h
+    timelock, then anyone calls `tusdt-vault-alpha::execute_global_params_update()`).
 
 After step 11 the protocol contracts are steered exclusively by the governance contract, and within
 governance the maintainer/council split (see [Governance & Treasury](#governance--treasury)) applies.
@@ -175,16 +176,24 @@ no TS scripts yet — deploy and wire them with `cargo contract` as shown.
 
 ## Working Flow
 
-### 1) Vault lifecycle (two-step alpha deposit)
+### 1) Vault lifecycle (atomic pull deposit)
 
-1. User registers deposit intent: `deposit_alpha(amount, netuid)`.
-2. User transfers alpha stake to the vault contract via subtensor `transfer_stake` extrinsic (the vault becomes the new coldkey).
-3. User creates vault: `create_alpha_vault(netuid)` — verifies stake via chain extension and opens the CDP.
-4. User borrows token: `borrow_token(vault_id, amount)`.
-5. User repays token: `repay_token(vault_id, amount)`.
-6. Anyone can trigger debt accrual: `accrue_interest(owner, vault_id)`.
-7. User adds more alpha collateral: `add_alpha_collateral(vault_id)` — re-syncs stake from chain.
-8. User releases alpha collateral: `release_alpha_collateral(vault_id, amount, dest_coldkey)` — returns stake via chain extension.
+1. User stakes alpha under the vault's hotkey (if not already staked there) — the pull keeps the hotkey.
+2. User creates vault: `create_alpha_vault(amount, netuid)` — the contract atomically pulls `amount`
+   of the caller's alpha into its own coldkey via the caller-forwarded `caller_transfer_stake`
+   chain extension (function 25) and opens the CDP in the same message. Deposits are always
+   attributed to the caller; no separate intent or `transfer_stake` extrinsic is needed.
+   Requires the subnet's `TransferToggle` to be on and the amount to exceed the chain's minimum
+   stake (0.002 TAO equivalent); failures revert cleanly with `StakeTransferFailed`.
+3. User borrows token: `borrow_token(vault_id, amount)`.
+4. User repays token: `repay_token(vault_id, amount)`.
+5. Anyone can trigger debt accrual: `accrue_interest(owner, vault_id)`.
+6. User adds more alpha collateral: `add_alpha_collateral(vault_id, amount)` — pulls exactly
+   `amount` from the caller, same mechanism as vault creation.
+7. User releases alpha collateral: `release_alpha_collateral(vault_id, amount, dest_coldkey)` — returns stake via chain extension.
+
+Deposit messages are EOA-facing: a contract calling the vault would pull its own stake, since the
+chain extension forwards the immediate caller's origin.
 
 ### 2) Interest model
 
@@ -209,25 +218,33 @@ the deployer; after wiring (deployment steps 7 & 9) it is the **governance contr
 them through governance's forwarders rather than calling the protocol contracts directly. See
 [Governance & Treasury](#governance--treasury) for who may invoke what.
 
-Risk params are **per-netuid** and applied behind a timelock. Governance calls
-`set_contract_params(netuid, params)` for each subnet. Params: `collateral_ratio`, `liquidation_ratio`,
-`interest_rate`, `liquidation_fee`, `transaction_fee`, `borrow_cap`, per-vault and total collateral
-caps, `auction_duration_ms`, `max_oracle_age_ms`. Falls back to defaults for unconfigured netuids.
+Risk params split into two scopes, both applied behind a 24h timelock:
 
-Governance also controls which subnets are accepted via `set_approved_netuid(netuid, approved)`.
+- **Per-netuid** — governance schedules `set_contract_params(netuid, params)` per subnet. Params:
+  `collateral_ratio`, `liquidation_ratio`, `interest_rate`, `liquidation_fee` (all basis points).
+  Falls back to defaults for unconfigured netuids.
+- **Global (all netuids)** — governance schedules `set_global_params(config)`. Params:
+  `transaction_fee` (basis points), `auction_duration_ms`, `max_oracle_age_ms`.
+
+Governance also controls which subnets are accepted via `set_approved_netuid(netuid, approved)`
+(exposed after hand-off through the `vault_set_approved_netuid` forwarder).
 
 Oracle reporter access (`set_reporter`) is managed by the oracle's validator; the validator and the
 max price deviation are governance-set. The active round is committed by the validator via
 `commit_round`; governance can also commit an emergency override price (see below).
 
-Default vault params:
+Default per-netuid params:
 
 - Collateral ratio: `150%`
 - Liquidation ratio: `120%`
-- Interest rate: `5% APR` (approximately `5.13% APY` under hourly compounding)
-- Liquidation fee: `1%`
-- Auction duration: `3_600_000` milliseconds
-- Max oracle age: `3_600_000` milliseconds
+- Interest rate: `10% APR` (approximately `10.52% APY` under hourly compounding)
+- Liquidation fee: `11%`
+
+Default global params:
+
+- Transaction fee: `0.3%` (30 bps)
+- Auction duration: `3_600_000` milliseconds (1 hour)
+- Max oracle age: `1_800_000` milliseconds (30 minutes)
 
 ## Governance & Treasury
 
@@ -260,6 +277,8 @@ governance:
 | Forwarder | Gated by | Target |
 | --- | --- | --- |
 | `vault_set_contract_params(netuid, params)`, `vault_cancel_contract_params_update(netuid)` | maintainer | vault-alpha (per-netuid timelocked params) |
+| `vault_set_global_params(config)`, `vault_cancel_global_params_update()` | maintainer | vault-alpha (global timelocked params: fee, auction duration, oracle age) |
+| `vault_set_approved_netuid(netuid, approved)` | maintainer | vault-alpha (accepted collateral subnets) |
 | `vault_update_treasury`, `vault_update_platform`, `vault_unpause` | maintainer | vault-alpha |
 | `vault_pause` | **council** (fast emergency halt) | vault-alpha |
 | `oracle_set_validator`, `oracle_set_max_price_deviation` | maintainer | oracle |
@@ -295,10 +314,10 @@ Each order tracks `status`: `Active` → `Fulfilled` or `Cancelled`.
 
 ### Coldkey model (no proxy)
 
-Alpha sellers transfer stake to the contract (which becomes the coldkey) via a two-step flow:
-1. `deposit_alpha(amount, netuid)` — register intent
-2. Transfer alpha stake to the contract via subtensor `transfer_stake` extrinsic
-3. `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` — creates the order
+Alpha sellers' stake is pulled into the contract (which becomes the coldkey) atomically:
+`create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` pulls
+`alpha_amount` of the caller's alpha (held under the contract's hotkey) via the caller-forwarded
+`caller_transfer_stake` chain extension in the same message — no separate deposit step.
 
 Buy orders using TUSDT require the maker to `approve` the contract first. Buy orders using native
 TAO send TAO with the `create_order` call.
@@ -307,7 +326,7 @@ TAO send TAO with the `create_order` call.
 
 Anyone (except the maker) can call `fulfill_order(order_id)` to execute a swap:
 - **Sell orders**: taker sends counter-collateral, receives alpha
-- **Buy orders**: taker deposits alpha (same two-step flow), receives the maker's locked collateral
+- **Buy orders**: the taker's alpha is pulled atomically at fulfillment, and the taker receives the maker's locked collateral
 
 Fees are deducted from the maker's side at fulfillment time, configurable by the owner.
 
@@ -315,16 +334,15 @@ Fees are deducted from the maker's side at fulfillment time, configurable by the
 
 | Method | Description |
 |--------|-------------|
-| `deposit_alpha(amount, netuid)` | Register alpha deposit intent |
-| `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` | Create order |
-| `fulfill_order(order_id)` | Execute swap (permissionless) |
+| `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` | Create order (Sell pulls the maker's alpha atomically) |
+| `fulfill_order(order_id)` | Execute swap (permissionless; Buy pulls the taker's alpha) |
 | `cancel_order(order_id)` | Cancel own order, return assets |
 | `update_fee_rate(bps)` | Owner: change fee rate |
 | `pause()` / `unpause()` | Owner: emergency control |
 
 ## Useful Read Methods
 
-- Vault: `get_vault`, `get_total_debt`, `get_contract_params(netuid)`, `is_approved_netuid(netuid)`, `alpha_price_netuid()`, `get_oracle_address`, `get_vaults`, `get_all_vaults`
+- Vault: `get_vault`, `get_total_debt`, `get_contract_params(netuid)`, `get_global_params()`, `is_approved_netuid(netuid)`, `get_oracle_address`, `get_vaults`, `get_all_vaults`
 - Oracle: `get_latest_price`, `get_current_round_summary`, `is_reporter`
 - Chain extension: `get_alpha_price(netuid)` — on-chain subnet alpha/TAO price (RAO-scaled by 1e9)
 - Oracle: `get_latest_price`, `get_current_round_summary`, `is_reporter`

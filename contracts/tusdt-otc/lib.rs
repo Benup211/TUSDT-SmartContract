@@ -9,6 +9,7 @@ mod otc {
     use tusdt_erc20::TusdtErc20Ref;
     use tusdt_primitives::Ratio;
 
+    /// Which side of the trade the maker is on.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -19,53 +20,76 @@ mod otc {
         Sell,
     }
 
+    /// The asset used as collateral in the trade.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub enum Collateral {
+        /// TUSDT stablecoin (PSP22 token).
         Tusdt,
+        /// Native chain token (TAO).
         Native,
     }
 
+    /// Lifecycle state of an order.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub enum OrderStatus {
+        /// Order is open and can be fulfilled or cancelled.
         Active,
+        /// Order has been fulfilled and is closed.
         Fulfilled,
+        /// Order was cancelled by the maker before fulfillment.
         Cancelled,
     }
 
+    /// A single order in the OTC marketplace.
     #[derive(Debug, Clone)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct Order {
+        /// Sequential order ID, assigned at creation.
         pub id: u64,
+        /// Account that created the order.
         pub maker: AccountId,
+        /// Subnet netuid for the alpha asset being traded.
         pub netuid: u16,
+        /// Whether the maker is buying or selling alpha.
         pub side: OrderSide,
+        /// The collateral asset the maker puts up.
         pub collateral: Collateral,
+        /// The collateral asset the taker must provide.
         pub counter_collateral: Collateral,
         /// Units of counter-collateral per alpha unit, in basis points relative to
         /// `get_alpha_price(netuid)`.  10_000 = market price, 10_500 = 5 % above, etc.
         pub price_bps: u32,
+        /// Amount of alpha (in RAO) to trade.
         pub alpha_amount: Balance,
+        /// Current lifecycle status: Active, Fulfilled, or Cancelled.
         pub status: OrderStatus,
+        /// Block timestamp (milliseconds) when the order was created.
         pub created_at: u64,
     }
 
+    /// OTC swap marketplace storage: owner, hotkey, TUSDT token, fee rate,
+    /// pause flag, order book, and per-netuid reserved-alpha tracking.
     #[ink(storage)]
     pub struct TusdtOtc {
+        /// Contract owner; controls fee rate, pause, and excess-alpha claims.
         owner: AccountId,
+        /// Hotkey used for alpha stake transfers via the chain extension.
         hotkey: AccountId,
+        /// Reference to the TUSDT ERC20 token contract.
         token: TusdtErc20Ref,
         /// Fee in basis points (e.g. 30 = 0.3 %), deducted from the maker's side.
         fee_rate: Ratio,
+        /// When `true` all trading operations are blocked.
         paused: bool,
+        /// Map from order ID to full Order struct.
         orders: Mapping<u64, Order>,
+        /// Auto-incrementing counter for the next order ID.
         next_order_id: u64,
-        /// Two-step deposit intent: (caller, netuid) → alpha amount.
-        pending_deposits: Mapping<(AccountId, u16), Balance>,
         /// Per-netuid total alpha reserved by active Sell orders. Used to compute
         /// excess alpha (actual stake minus reserved) for `claim_excess_alpha`.
         netuid_total_reserved: Mapping<u16, Balance>,
@@ -73,6 +97,7 @@ mod otc {
 
     // ── Events ────────────────────────────────────────────────────────
 
+    /// Emitted when a new order is created.
     #[ink(event)]
     pub struct OrderCreated {
         #[ink(topic)]
@@ -82,6 +107,7 @@ mod otc {
         side: OrderSide,
     }
 
+    /// Emitted when an active order is fulfilled by a taker.
     #[ink(event)]
     pub struct OrderFulfilled {
         #[ink(topic)]
@@ -92,6 +118,7 @@ mod otc {
         taker: AccountId,
     }
 
+    /// Emitted when a maker cancels their active order.
     #[ink(event)]
     pub struct OrderCancelled {
         #[ink(topic)]
@@ -100,12 +127,15 @@ mod otc {
         maker: AccountId,
     }
 
+    /// Emitted when ownership is transferred to a new account.
     #[ink(event)]
     pub struct OwnerUpdated { previous: AccountId, new: AccountId }
 
+    /// Emitted when the fee rate is changed by the owner.
     #[ink(event)]
     pub struct FeeRateUpdated { previous_bps: u32, new_bps: u32 }
 
+    /// Emitted when excess alpha is unstaked and native TAO is sent to a recipient.
     #[ink(event)]
     pub struct ExcessAlphaClaimed {
         #[ink(topic)]
@@ -116,28 +146,43 @@ mod otc {
         recipient: AccountId,
     }
 
+    /// Emitted when the contract is paused by the owner.
     #[ink(event)]
     pub struct Paused {}
 
+    /// Emitted when the contract is unpaused by the owner.
     #[ink(event)]
     pub struct Unpaused {}
 
     // ── Errors ────────────────────────────────────────────────────────
 
+    /// Errors returned by the OTC marketplace contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
+        /// The caller is not the contract owner.
         NotOwner,
+        /// The caller is not the order maker.
         NotMaker,
+        /// The specified order ID does not exist.
         OrderNotFound,
+        /// The order is not in Active status.
         OrderNotActive,
+        /// A maker cannot fulfill their own order.
         CannotFulfillOwnOrder,
+        /// The caller did not supply enough collateral (native transfers).
         InsufficientCollateral,
+        /// The chain extension call failed (stake transfer, price read, etc.).
         ChainExtensionFailed,
+        /// No alpha stake exists for the given hotkey/coldkey/netuid pair.
         NoAlphaStakeFound,
+        /// The underlying token or native transfer call failed.
         TransferFailed,
+        /// An arithmetic overflow or underflow occurred.
         ArithmeticError,
+        /// The contract is paused and trading is disabled.
         ContractPaused,
+        /// The `price_bps` value is zero, which is not allowed.
         InvalidPriceBps,
     }
 
@@ -146,6 +191,12 @@ mod otc {
     // ── Implementation ────────────────────────────────────────────────
 
     impl TusdtOtc {
+        /// Initializes the OTC marketplace with an owner, hotkey, TUSDT token
+        /// address, and a fee rate in basis points (e.g. 30 = 0.3%).
+        ///
+        /// The contract starts in the unpaused state. The `fee_rate_bps` is
+        /// stored as an internal [`Ratio`] and is capped by the maximum
+        /// basis-point value (10_000 = 100%).
         #[ink(constructor)]
         pub fn new(
             owner: AccountId,
@@ -161,32 +212,17 @@ mod otc {
                 paused: false,
                 orders: Mapping::default(),
                 next_order_id: 0,
-                pending_deposits: Mapping::default(),
                 netuid_total_reserved: Mapping::default(),
             }
         }
 
         // ── Trading ────────────────────────────────────────────────
 
-        /// Step 1 of two-step alpha deposit: register intent to sell alpha.
-        #[ink(message)]
-        pub fn deposit_alpha(&mut self, amount: Balance, netuid: u16) -> Result<()> {
-            self.ensure_not_paused()?;
-            if amount == 0 {
-                return Err(Error::InsufficientCollateral);
-            }
-            let caller = self.env().caller();
-            if self.pending_deposits.get((caller, netuid)).is_some() {
-                return Err(Error::InsufficientCollateral);
-            }
-            self.pending_deposits.insert((caller, netuid), &amount);
-            Ok(())
-        }
-
-        /// Create an order.  For Sell orders the caller must have first called
-        /// `deposit_alpha` and transferred alpha stake to this contract.  For
-        /// Buy orders with `Tusdt` collateral the caller must have approved this
-        /// contract to spend the required amount.
+        /// Create an order.  For Sell orders, `alpha_amount` of the CALLER's alpha
+        /// stake (held under this contract's hotkey) is pulled into the contract
+        /// atomically via the caller-forwarded `caller_transfer_stake` chain extension
+        /// — no prior deposit step is needed.  For Buy orders with `Tusdt` collateral
+        /// the caller must have approved this contract to spend the required amount.
         ///
         /// `price_bps` is relative to the chain-extension alpha price:
         ///   10_000 = market,  10_500 = 5 % above,  9_500 = 5 % below.
@@ -212,25 +248,18 @@ mod otc {
 
             match side {
                 OrderSide::Sell => {
-                    // Two-step deposit: caller must have registered intent with enough alpha.
-                    let deposited = self
-                        .pending_deposits
-                        .take((caller, netuid))
-                        .ok_or(Error::InsufficientCollateral)?;
-                    if deposited < alpha_amount {
-                        return Err(Error::InsufficientCollateral);
-                    }
-                    // Stake verification: contract actually holds enough alpha.
-                    let available = self.get_contract_stake(netuid)?;
-                    if available < alpha_amount {
-                        return Err(Error::InsufficientCollateral);
-                    }
-                    // If the user deposited more than needed, re-register the remainder.
-                    let remainder = deposited.checked_sub(alpha_amount)
-                        .ok_or(Error::ArithmeticError)?;
-                    if remainder > 0 {
-                        self.pending_deposits.insert((caller, netuid), &remainder);
-                    }
+                    // Atomic pull: transfer the maker's alpha into the contract's
+                    // coldkey. The destination is always this contract.
+                    self.env()
+                        .extension()
+                        .caller_transfer_stake(
+                            self.env().account_id(),
+                            self.hotkey,
+                            netuid,
+                            netuid,
+                            alpha_amount,
+                        )
+                        .map_err(|_| Error::ChainExtensionFailed)?;
                     // Track this Sell order's alpha as reserved.
                     let current_reserved = self.netuid_total_reserved.get(netuid).unwrap_or_default();
                     self.netuid_total_reserved.insert(
@@ -330,18 +359,18 @@ mod otc {
                     );
                 }
                 OrderSide::Buy => {
-                    // Taker must have called deposit_alpha + transferred stake to
-                    // the contract before fulfilling.  Verify the taker's deposit.
-                    let taker_deposit = self
-                        .pending_deposits
-                        .get((taker, order.netuid))
-                        .ok_or(Error::InsufficientCollateral)?;
-                    if taker_deposit < order.alpha_amount {
-                        return Err(Error::InsufficientCollateral);
-                    }
-                    // Consume the taker's deposit and verify actual stake.
-                    self.pending_deposits.remove((taker, order.netuid));
-                    let _ = self.get_contract_stake(order.netuid)?;
+                    // Atomic pull: transfer the taker's alpha into the contract's
+                    // coldkey via the caller-forwarded chain extension, then settle.
+                    self.env()
+                        .extension()
+                        .caller_transfer_stake(
+                            self.env().account_id(),
+                            self.hotkey,
+                            order.netuid,
+                            order.netuid,
+                            order.alpha_amount,
+                        )
+                        .map_err(|_| Error::ChainExtensionFailed)?;
                     // Send alpha from contract to maker (taker provided it).
                     self.transfer_alpha_to(order.netuid, order.maker, order.alpha_amount)?;
                     // Send maker's held collateral to taker.
@@ -414,6 +443,7 @@ mod otc {
 
         // ── Owner ────────────────────────────────────────────────────
 
+        /// Transfers contract ownership to a new account. Callable only by the current owner.
         #[ink(message)]
         pub fn update_owner(&mut self, new_owner: AccountId) -> Result<()> {
             self.ensure_owner()?;
@@ -423,6 +453,8 @@ mod otc {
             Ok(())
         }
 
+        /// Updates the protocol fee rate. Callable only by the owner.
+        /// `fee_rate_bps` is in basis points (e.g. 30 = 0.3%).
         #[ink(message)]
         pub fn update_fee_rate(&mut self, fee_rate_bps: u32) -> Result<()> {
             self.ensure_owner()?;
@@ -432,6 +464,7 @@ mod otc {
             Ok(())
         }
 
+        /// Pauses the contract, blocking all trading operations. Owner only.
         #[ink(message)]
         pub fn pause(&mut self) -> Result<()> {
             self.ensure_owner()?;
@@ -440,6 +473,7 @@ mod otc {
             Ok(())
         }
 
+        /// Unpauses the contract, re-enabling trading operations. Owner only.
         #[ink(message)]
         pub fn unpause(&mut self) -> Result<()> {
             self.ensure_owner()?;
@@ -498,30 +532,38 @@ mod otc {
 
         // ── Queries ──────────────────────────────────────────────────
 
+        /// Returns the full `Order` struct for a given order ID, or `None` if not found.
         #[ink(message)]
         pub fn get_order(&self, order_id: u64) -> Option<Order> {
             self.orders.get(order_id)
         }
 
+        /// Returns the next available order ID (auto-increment counter).
         #[ink(message)]
         pub fn get_next_order_id(&self) -> u64 {
             self.next_order_id
         }
 
+        /// Returns the contract owner account ID.
         #[ink(message)]
         pub fn owner(&self) -> AccountId { self.owner }
 
+        /// Returns the hotkey used for alpha stake operations.
         #[ink(message)]
         pub fn hotkey(&self) -> AccountId { self.hotkey }
 
+        /// Returns `true` if the contract is currently paused.
         #[ink(message)]
         pub fn is_paused(&self) -> bool { self.paused }
 
+        /// Returns the current fee rate in basis points (e.g. 30 = 0.3%).
         #[ink(message)]
         pub fn fee_rate_bps(&self) -> u32 {
             self.fee_rate.to_basis_points().unwrap_or(0)
         }
 
+        /// Returns the total amount of alpha (in RAO) reserved by active Sell
+        /// orders on a subnet.
         #[ink(message)]
         pub fn get_reserved_alpha(&self, netuid: u16) -> Balance {
             self.netuid_total_reserved.get(netuid).unwrap_or_default()
@@ -529,6 +571,7 @@ mod otc {
 
         // ── Internals ────────────────────────────────────────────────
 
+        /// Reverts with `NotOwner` if the caller is not the contract owner.
         fn ensure_owner(&self) -> Result<()> {
             if self.env().caller() != self.owner {
                 return Err(Error::NotOwner);
@@ -536,6 +579,7 @@ mod otc {
             Ok(())
         }
 
+        /// Reverts with `ContractPaused` if the contract is currently paused.
         fn ensure_not_paused(&self) -> Result<()> {
             if self.paused {
                 return Err(Error::ContractPaused);
@@ -543,6 +587,9 @@ mod otc {
             Ok(())
         }
 
+        /// Queries the chain extension for the contract's currently-available
+        /// (total minus locked) stake on a subnet. Returns `NoAlphaStakeFound`
+        /// if no stake entry exists.
         fn get_contract_stake(&mut self, netuid: u16) -> Result<Balance> {
             let info = self
                 .env()
@@ -557,7 +604,9 @@ mod otc {
             stake.checked_sub(locked).ok_or(Error::ArithmeticError)
         }
 
-        /// Pull collateral from maker into contract custody (Buy orders).
+        /// Pulls required collateral from the maker into the contract's custody.
+        /// Used for Buy orders: TUSDT via `transfer_from`, Native via
+        /// `transferred_value`.
         fn pull_collateral(
             &mut self,
             maker: AccountId,
@@ -600,8 +649,9 @@ mod otc {
             Ok(())
         }
 
-        /// Pull counter-collateral from taker at fulfillment time.  Called for Sell
-        /// orders where the taker provides collateral to receive the maker's alpha.
+        /// Pulls counter-collateral from the taker at fulfillment time. Used
+        /// for Sell orders where the taker provides collateral to receive the
+        /// maker's alpha. TUSDT via `transfer_from`, Native via `transferred_value`.
         fn pull_counter_collateral(
             &mut self,
             taker: AccountId,
@@ -624,6 +674,8 @@ mod otc {
             Ok(())
         }
 
+        /// Transfers alpha stake from the contract's coldkey to a recipient
+        /// via the chain extension `transfer_stake` function.
         fn transfer_alpha_to(
             &mut self,
             netuid: u16,
@@ -636,6 +688,9 @@ mod otc {
                 .map_err(|_| Error::ChainExtensionFailed)
         }
 
+        /// Sends counter-collateral to the recipient after deducting the
+        /// protocol fee, which is forwarded to the owner. Supports both
+        /// TUSDT and Native token kinds.
         fn send_counter_collateral(
             &mut self,
             _payer: AccountId,
@@ -670,6 +725,7 @@ mod otc {
             Ok(())
         }
 
+        /// Returns locked collateral to the maker after a Buy-order cancellation.
         fn return_collateral(
             &mut self,
             recipient: AccountId,
@@ -694,6 +750,9 @@ mod otc {
 
     #[cfg(test)]
     impl TusdtOtc {
+        /// Test-only constructor that sets up a minimal contract state for
+        /// unit testing. Uses default accounts (owner as specified, bob as
+        /// hotkey, charlie as token address).
         pub(crate) fn new_for_test(owner: AccountId) -> Self {
             use ink::env::call::FromAccountId;
             let accounts = ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>();
@@ -705,7 +764,6 @@ mod otc {
                 paused: false,
                 orders: Mapping::default(),
                 next_order_id: 0,
-                pending_deposits: Mapping::default(),
                 netuid_total_reserved: Mapping::default(),
             }
         }

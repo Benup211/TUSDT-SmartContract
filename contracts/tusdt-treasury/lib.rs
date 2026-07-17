@@ -89,9 +89,13 @@ mod treasury {
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
+        /// The caller is not the governance account.
         NotGovernance,
+        /// The fund's balance is insufficient for the requested release amount.
         InsufficientFundBalance,
+        /// The ERC20 or native transfer call failed.
         TransferFailed,
+        /// An arithmetic overflow or underflow occurred.
         ArithmeticError,
     }
 

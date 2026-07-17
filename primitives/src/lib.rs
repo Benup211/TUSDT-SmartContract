@@ -37,7 +37,10 @@ const BASIS_POINTS_DENOMINATOR: u128 = 10_000;
 pub struct Ratio(u128);
 
 impl Ratio {
-    /// Creates a `Ratio` from its raw `FixedU128` inner value.
+    /// Creates a `Ratio` from the raw `u128` inner value of a `FixedU128`. The
+    /// 18-decimal-place fixed-point scale means `from_inner(1_000_000_000_000_000_000)` is
+    /// equivalent to `from_integer(1)`. **Prefer [`from_integer`] for whole-number ratios**
+    /// — a raw inner of `1` represents ~1e-18, not 1.0.
     pub const fn from_inner(inner: u128) -> Self {
         Self(inner)
     }

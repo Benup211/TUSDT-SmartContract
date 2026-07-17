@@ -25,10 +25,11 @@ function parseContractName(): ContractName {
     value !== "vault" &&
     value !== "treasury" &&
     value !== "governance" &&
-    value !== "election"
+    value !== "election" &&
+    value !== "otc"
   ) {
     throw new Error(
-      "Missing or invalid --contract. Expected one of: erc20, auction, oracle, vault, treasury, governance, election.",
+      "Missing or invalid --contract. Expected one of: erc20, auction, oracle, vault, treasury, governance, election, otc.",
     );
   }
 

@@ -13,6 +13,8 @@ use super::*;
 impl TusdtGovernance {
     // ----- Vault: maintainer-gated (governing/config) -----
 
+    /// Schedules a vault contract-parameter update for a specific netuid.
+    /// Maintainer-only. Delegates to `vault.set_contract_params(netuid, params)`.
     pub(crate) fn forward_vault_set_contract_params(
         &mut self,
         netuid: u16,
@@ -24,6 +26,8 @@ impl TusdtGovernance {
             .map_err(|_| Error::VaultCallFailed)
     }
 
+    /// Cancels the vault's scheduled contract-parameter update for a netuid.
+    /// Maintainer-only. Delegates to `vault.cancel_contract_params_update(netuid)`.
     pub(crate) fn forward_vault_cancel_contract_params_update(
         &mut self,
         netuid: u16,
@@ -34,6 +38,8 @@ impl TusdtGovernance {
             .map_err(|_| Error::VaultCallFailed)
     }
 
+    /// Updates the vault's treasury (fee recipient) account.
+    /// Maintainer-only. Delegates to `vault.update_treasury(new_treasury)`.
     pub(crate) fn forward_vault_update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
         self.ensure_maintainer()?;
         self.vault
@@ -41,6 +47,8 @@ impl TusdtGovernance {
             .map_err(|_| Error::VaultCallFailed)
     }
 
+    /// Updates the vault's platform (pause operator) account.
+    /// Maintainer-only. Delegates to `vault.update_platform(new_platform)`.
     pub(crate) fn forward_vault_update_platform(&mut self, new_platform: AccountId) -> Result<()> {
         self.ensure_maintainer()?;
         self.vault
@@ -48,11 +56,15 @@ impl TusdtGovernance {
             .map_err(|_| Error::VaultCallFailed)
     }
 
+    /// Unpauses the vault; maintainer-only (deliberate recovery).
+    /// Delegates to `vault.unpause()`.
     pub(crate) fn forward_vault_unpause(&mut self) -> Result<()> {
         self.ensure_maintainer()?;
         self.vault.unpause().map_err(|_| Error::VaultCallFailed)
     }
 
+    /// Claims excess alpha on a subnet from the vault and sends the TAO to treasury.
+    /// Maintainer-only. Delegates to `vault.claim_excess_alpha(netuid)`.
     pub(crate) fn forward_vault_claim_excess_alpha(&mut self, netuid: u16) -> Result<()> {
         self.ensure_maintainer()?;
         self.vault
@@ -60,8 +72,45 @@ impl TusdtGovernance {
             .map_err(|_| Error::VaultCallFailed)
     }
 
+    /// Approves or removes a netuid for vault alpha collateral.
+    /// Maintainer-only. Delegates to `vault.set_approved_netuid(netuid, approved)`.
+    pub(crate) fn forward_vault_set_approved_netuid(
+        &mut self,
+        netuid: u16,
+        approved: bool,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .set_approved_netuid(netuid, approved)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
+    /// Schedules a vault global-parameter update (24h timelock).
+    /// Maintainer-only. Delegates to `vault.set_global_params(config)`.
+    pub(crate) fn forward_vault_set_global_params(
+        &mut self,
+        config: VaultGlobalParamsConfig,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .set_global_params(config)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
+    /// Cancels the vault's currently scheduled global-parameter update.
+    /// Maintainer-only. Delegates to `vault.cancel_global_params_update()`.
+    pub(crate) fn forward_vault_cancel_global_params_update(&mut self) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .cancel_global_params_update()
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
     // ----- Vault: council-gated (operational/emergency) -----
 
+    /// Pauses the vault; council-only (operational/emergency halt).
+    /// Any single council member can trigger this — no consensus needed.
+    /// Delegates to `vault.pause()`.
     pub(crate) fn forward_vault_pause(&mut self) -> Result<()> {
         self.ensure_council()?;
         self.vault.pause().map_err(|_| Error::VaultCallFailed)
@@ -69,6 +118,8 @@ impl TusdtGovernance {
 
     // ----- Oracle: maintainer-gated (config/risk) -----
 
+    /// Sets/clears the oracle's round-committing validator.
+    /// Maintainer-only. Delegates to `oracle.set_validator(validator)`.
     pub(crate) fn forward_oracle_set_validator(
         &mut self,
         validator: Option<AccountId>,
@@ -79,6 +130,8 @@ impl TusdtGovernance {
             .map_err(|_| Error::OracleCallFailed)
     }
 
+    /// Updates the oracle's max allowed price deviation (as a `Ratio`).
+    /// Maintainer-only. Delegates to `oracle.set_max_price_deviation(max_price_deviation)`.
     pub(crate) fn forward_oracle_set_max_price_deviation(
         &mut self,
         max_price_deviation: Ratio,
@@ -89,6 +142,8 @@ impl TusdtGovernance {
             .map_err(|_| Error::OracleCallFailed)
     }
 
+    /// Commits an emergency oracle price, bypassing quorum and deviation checks.
+    /// Maintainer-only. Delegates to `oracle.commit_round_governance(price)`.
     pub(crate) fn forward_oracle_commit_round(&mut self, price: Ratio) -> Result<PriceData> {
         self.ensure_maintainer()?;
         self.oracle
@@ -96,6 +151,8 @@ impl TusdtGovernance {
             .map_err(|_| Error::OracleCallFailed)
     }
 
+    /// Updates the governing subnet netuid for the oracle.
+    /// Maintainer-only. Delegates to `oracle.set_netuid(netuid)`.
     pub(crate) fn forward_oracle_set_netuid(&mut self, netuid: u16) -> Result<()> {
         self.ensure_maintainer()?;
         self.oracle
@@ -103,6 +160,8 @@ impl TusdtGovernance {
             .map_err(|_| Error::OracleCallFailed)
     }
 
+    /// Updates the minimum submitter stake threshold for the oracle.
+    /// Maintainer-only. Delegates to `oracle.set_min_submitter_stake(min_stake)`.
     pub(crate) fn forward_oracle_set_min_submitter_stake(
         &mut self,
         min_stake: u128,
@@ -115,6 +174,8 @@ impl TusdtGovernance {
 
     // ----- Auction: maintainer-gated (config) -----
 
+    /// Sets/clears the auction admin (allowed to bid on expired no-bid auctions).
+    /// Maintainer-only. Delegates to `auction.set_admin(admin)`.
     pub(crate) fn forward_auction_set_admin(&mut self, admin: Option<AccountId>) -> Result<()> {
         self.ensure_maintainer()?;
         self.auction

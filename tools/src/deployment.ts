@@ -142,7 +142,8 @@ export async function deployVault(
   tokenCodeHash: string,
   auctionCodeHash: string,
   oracleCodeHash: string,
-  netuid: number,
+  oracleNetuid: number,
+  hotkey: string,
   waitFor: ExtrinsicWaitFor = "inBlock",
 ): Promise<ContractPromise> {
   const artifact = loadContractArtifact("vault");
@@ -152,7 +153,7 @@ export async function deployVault(
     artifact.abi,
     artifact.wasm,
     "new",
-    [treasuryAddress, tokenCodeHash, auctionCodeHash, oracleCodeHash, netuid],
+    [treasuryAddress, tokenCodeHash, auctionCodeHash, oracleCodeHash, oracleNetuid, hotkey],
     waitFor,
   );
 

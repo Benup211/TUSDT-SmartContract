@@ -76,7 +76,7 @@ mod tusdt {
             self.controller
         }
 
-        /// Transfers the controller role to a new account. Callable only once by the current
+        /// Transfers the controller role to a new account. Callable only by the current
         /// controller. Removes the old controller from minters and adds the new one.
         #[ink(message)]
         pub fn set_controller(&mut self, new_controller: AccountId) -> Result<()> {

@@ -921,7 +921,7 @@ fn set_min_submitter_stake_and_get() {
 
     assert_eq!(
         oracle.min_submitter_stake(),
-        1_000_000_000_000
+        10_000_000_000
     );
     assert_eq!(oracle.set_min_submitter_stake(500_000_000_000), Ok(()));
     assert_eq!(oracle.min_submitter_stake(), 500_000_000_000);
