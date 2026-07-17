@@ -14,7 +14,7 @@ mod oracle {
     const PAGE_SIZE: u32 = 10;
     const MAX_ROUND_SUBMISSIONS: u32 = 256;
     const DEFAULT_MAX_PRICE_DEVIATION_BASIS_POINTS: u32 = 1_000;
-    /// Minimum subnet alpha stake required to submit a price (default 1e12, matching governance).
+    /// Minimum subnet alpha stake required to submit a price (default 10_000_000_000 rao = 10 TAO).
     const DEFAULT_MIN_SUBMITTER_STAKE: u128 = 10_000_000_000;
 
     /// Snapshot of a committed oracle round, including its final price and source median.
@@ -273,7 +273,7 @@ mod oracle {
             Ok(())
         }
 
-        /// Commits the current round using the median submission price or an optional validator override.
+        /// Commits the current round using the median submission price or an optional validator override. Validator-only.
         #[ink(message)]
         pub fn commit_round(&mut self, override_price: Option<Ratio>) -> Result<PriceData> {
             self.ensure_validator()?;
@@ -302,7 +302,7 @@ mod oracle {
             )
         }
 
-        /// Commits the current round with a governance-supplied price, bypassing quorum and deviation checks.
+        /// Commits the current round with a governance-supplied price, bypassing quorum and deviation checks. Governance-only.
         #[ink(message)]
         pub fn commit_round_governance(&mut self, price: Ratio) -> Result<PriceData> {
             self.ensure_governance()?;
@@ -336,7 +336,7 @@ mod oracle {
             Ok(())
         }
 
-        /// Sets or clears the validator account allowed to commit rounds.
+        /// Sets or clears the validator account allowed to commit rounds. Governance-only.
         #[ink(message)]
         pub fn set_validator(&mut self, validator: Option<AccountId>) -> Result<()> {
             self.ensure_governance()?;
@@ -345,7 +345,7 @@ mod oracle {
             Ok(())
         }
 
-        /// Updates the maximum allowed deviation between consecutive committed prices.
+        /// Updates the maximum allowed deviation between consecutive committed prices. Governance-only.
         #[ink(message)]
         pub fn set_max_price_deviation(&mut self, max_price_deviation: Ratio) -> Result<()> {
             self.ensure_governance()?;
@@ -356,7 +356,7 @@ mod oracle {
             Ok(())
         }
 
-        /// Transfers oracle governance control to a new account.
+        /// Transfers oracle governance control to a new account. Controller-only.
         #[ink(message)]
         pub fn update_governance(&mut self, new_governance: AccountId) -> Result<()> {
             self.ensure_controller()?;

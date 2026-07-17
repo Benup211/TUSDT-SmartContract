@@ -48,12 +48,17 @@ mod governance {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct GovernanceParams {
+        /// How long voting stays open after a proposal is submitted, in milliseconds
+        /// (default 7 days = 604,800,000 ms).
         pub voting_period_ms: u64,
         /// Quorum as a fraction of the alpha circulating supply, in basis points (2_000 = 20%).
         /// A proposal passes only if the raw balance that voted reaches `circulating_supply *
         /// quorum_bps / 10_000`; see [`quorum`].
         pub quorum_bps: u32,
+        /// Minimum approval ratio in basis points (5_001 = 50.01%). Weighted by voting power:
+        /// `yes * 10_000 / (yes + no) >= approval_bps`.
         pub approval_bps: u32,
+        /// Unused in the current council-only proposal model; kept for SCALE compatibility.
         pub min_proposer_stake: u128,
         /// First day-of-month (UTC, inclusive) on which proposals may be submitted.
         pub submission_open_day: u8,
@@ -888,6 +893,7 @@ mod governance {
             Ok(())
         }
 
+        /// Checks that the caller is the current maintainer. Returns `NotMaintainer` otherwise.
         fn ensure_maintainer(&self) -> Result<()> {
             if self.env().caller() != self.maintainer {
                 return Err(Error::NotMaintainer);
@@ -895,6 +901,8 @@ mod governance {
             Ok(())
         }
 
+        /// Checks that the caller is the election contract (address matched at construction).
+        /// Returns `NotElection` otherwise.
         fn ensure_election(&self) -> Result<()> {
             if self.env().caller() != self.election.to_account_id() {
                 return Err(Error::NotElection);
@@ -902,6 +910,7 @@ mod governance {
             Ok(())
         }
 
+        /// Checks that the caller is a seated council member. Returns `NotCouncil` otherwise.
         fn ensure_council(&self) -> Result<()> {
             if !self.council.contains(&self.env().caller()) {
                 return Err(Error::NotCouncil);

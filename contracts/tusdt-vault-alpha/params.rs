@@ -11,6 +11,10 @@ const MIN_AUCTION_DURATION_MS: u64 = 60_000;
 const MAX_AUCTION_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 impl TusdtVaultAlpha {
+    /// Returns the default per-netuid vault parameters.
+    ///
+    /// Defaults: collateral ratio 150%, liquidation ratio 120%, interest rate 10% APR,
+    /// liquidation fee 11%.
     pub(crate) fn default_contract_params() -> VaultContractParams {
         let params = VaultContractParams {
             collateral_ratio: Ratio::from_basis_points(DEFAULT_COLLATERAL_RATIO_BASIS_POINTS),
@@ -23,6 +27,8 @@ impl TusdtVaultAlpha {
         params
     }
 
+    /// Converts an external bps-based `VaultContractParamsConfig` into internal
+    /// `VaultContractParams` values, validating all ratio bounds.
     pub(crate) fn contract_params_from_config(
         params: VaultContractParamsConfig,
     ) -> Result<VaultContractParams> {
@@ -36,6 +42,8 @@ impl TusdtVaultAlpha {
         Ok(config)
     }
 
+    /// Converts internal `VaultContractParams` back into a bps-based
+    /// `VaultContractParamsConfig` for external consumption.
     pub(crate) fn contract_params_to_config(
         params: VaultContractParams,
     ) -> VaultContractParamsConfig {
@@ -59,6 +67,12 @@ impl TusdtVaultAlpha {
         }
     }
 
+    /// Validates per-netuid contract parameters.
+    ///
+    /// - `collateral_ratio` must be >= 100% and strictly greater than `liquidation_ratio`
+    /// - `liquidation_ratio` must be >= 100%
+    /// - `interest_rate` must be <= 100%
+    /// - `liquidation_fee` must be <= 100%
     pub(crate) fn validate_contract_params(params: &VaultContractParams) -> Result<()> {
         let one = Ratio::one();
         if params.collateral_ratio < one {
@@ -79,6 +93,10 @@ impl TusdtVaultAlpha {
         Ok(())
     }
 
+    /// Returns the default global (contract-wide) parameters.
+    ///
+    /// Defaults: transaction fee 0.3% (30 bps), auction duration 1 hour,
+    /// max oracle age 30 minutes.
     pub(crate) fn default_global_params() -> VaultGlobalParams {
         let params = VaultGlobalParams {
             transaction_fee: Ratio::from_basis_points(DEFAULT_TRANSACTION_FEE_BASIS_POINTS),
@@ -90,6 +108,8 @@ impl TusdtVaultAlpha {
         params
     }
 
+    /// Converts an external bps-based `VaultGlobalParamsConfig` into internal
+    /// `VaultGlobalParams` values, validating all fields.
     pub(crate) fn global_params_from_config(
         config: VaultGlobalParamsConfig,
     ) -> Result<VaultGlobalParams> {
@@ -102,6 +122,8 @@ impl TusdtVaultAlpha {
         Ok(params)
     }
 
+    /// Converts internal `VaultGlobalParams` back into a bps-based
+    /// `VaultGlobalParamsConfig` for external consumption.
     pub(crate) fn global_params_to_config(params: VaultGlobalParams) -> VaultGlobalParamsConfig {
         VaultGlobalParamsConfig {
             transaction_fee: params
@@ -113,6 +135,11 @@ impl TusdtVaultAlpha {
         }
     }
 
+    /// Validates global (contract-wide) parameters.
+    ///
+    /// - `transaction_fee` must not exceed 100%
+    /// - `auction_duration_ms` must be within [60 seconds, 7 days]
+    /// - `max_oracle_age_ms` must be non-zero
     pub(crate) fn validate_global_params(params: &VaultGlobalParams) -> Result<()> {
         if params.transaction_fee > Ratio::one() {
             return Err(Error::InvalidRatio);

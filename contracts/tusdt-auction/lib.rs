@@ -225,7 +225,7 @@ mod auction {
             }
         }
 
-        /// Creates a new liquidation auction for a vault with specified collateral and debt, returning the auction ID.
+        /// Creates a new liquidation auction for a vault (controller/vault only). Returns the new auction ID.
         #[ink(message)]
         pub fn create_auction(
             &mut self,
@@ -323,7 +323,7 @@ mod auction {
             Ok(())
         }
 
-        /// Places a bid on an auction, transferring the bid amount and updating the highest bid if applicable.
+        /// Places a bid on an auction, transferring the bid amount and updating the highest bid if applicable. Permissionless — any account may bid.
         #[ink(message)]
         pub fn place_bid(
             &mut self,
@@ -428,7 +428,7 @@ mod auction {
             })
         }
 
-        /// Finalizes an auction after it has ended, marking the highest bidder as winner.
+        /// Finalizes an auction after it has ended, marking the highest bidder as winner. Permissionless — anyone may call once the deadline passes.
         #[ink(message)]
         pub fn finalize_auction(&mut self, auction_id: u32) -> Result<()> {
             let mut auction = self

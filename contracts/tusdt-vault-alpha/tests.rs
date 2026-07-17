@@ -38,6 +38,8 @@ fn setup_with_approved_netuid(
 struct MockExtension {
     stake: Option<u64>,
     should_fail: bool,
+    /// When set, the caller-forwarded stake pull (func 25) reports a write failure.
+    transfer_fails: bool,
 }
 
 impl test::ChainExtension for MockExtension {
@@ -85,6 +87,14 @@ impl test::ChainExtension for MockExtension {
             }
             // Write ops (2 = remove_stake, 6 = transfer_stake) — no-op success
             2 | 6 => 0,
+            // 25 = caller_transfer_stake (caller-forwarded pull) — honours transfer_fails
+            25 => {
+                if self.transfer_fails {
+                    2
+                } else {
+                    0
+                }
+            }
             _ => 1,
         }
     }
@@ -94,6 +104,7 @@ fn register_mock(stake: u64) {
     test::register_chain_extension(MockExtension {
         stake: Some(stake),
         should_fail: false,
+        transfer_fails: false,
     });
 }
 
@@ -101,6 +112,15 @@ fn register_mock_no_stake() {
     test::register_chain_extension(MockExtension {
         stake: None,
         should_fail: false,
+        transfer_fails: false,
+    });
+}
+
+fn register_mock_transfer_fails(stake: u64) {
+    test::register_chain_extension(MockExtension {
+        stake: Some(stake),
+        should_fail: false,
+        transfer_fails: true,
     });
 }
 
@@ -156,50 +176,56 @@ fn non_governance_cannot_manage_netuids() {
 }
 
 #[ink::test]
-fn deposit_alpha_rejected_for_unapproved_netuid() {
+fn create_alpha_vault_rejected_for_unapproved_netuid() {
     let (mut vault, accounts) = setup();
     set_caller(accounts.alice);
-    assert!(vault.deposit_alpha(100, 99).is_err());
+    register_mock(100);
+    assert_eq!(vault.create_alpha_vault(100, 99), Err(Error::UnapprovedNetuid));
 }
 
 #[ink::test]
-fn deposit_alpha_registers_intent() {
+fn create_alpha_vault_rejects_zero_amount() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     set_caller(accounts.alice);
-    vault.deposit_alpha(100, 1).unwrap();
+    register_mock(100);
+    assert_eq!(
+        vault.create_alpha_vault(0, 1),
+        Err(Error::InsufficientCollateral)
+    );
 }
 
 #[ink::test]
-fn create_alpha_vault_fails_without_deposit() {
-    let (mut vault, accounts) = setup_with_approved_netuid();
-    set_caller(accounts.bob);
-    assert!(vault.create_alpha_vault(1).is_err());
-}
-
-#[ink::test]
-fn create_alpha_vault_fails_for_wrong_depositor() {
+fn create_alpha_vault_rejected_when_paused() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     set_caller(accounts.alice);
-    vault.deposit_alpha(100, 1).unwrap();
-    set_caller(accounts.bob);
-    assert!(vault.create_alpha_vault(1).is_err());
+    vault.pause().unwrap();
+    register_mock(100);
+    assert_eq!(vault.create_alpha_vault(100, 1), Err(Error::ContractPaused));
 }
 
 #[ink::test]
-fn duplicate_deposit_rejected() {
+fn create_alpha_vault_pull_failure_leaves_no_state() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     set_caller(accounts.alice);
-    vault.deposit_alpha(100, 1).unwrap();
-    assert!(vault.deposit_alpha(200, 1).is_err());
+    // The caller-forwarded pull reports a write failure (e.g. caller lacks stake).
+    register_mock_transfer_fails(0);
+    assert_eq!(
+        vault.create_alpha_vault(1_000, 1),
+        Err(Error::StakeTransferFailed)
+    );
+    assert_eq!(vault.get_vaults_count(accounts.alice), 0);
+    assert_eq!(vault.get_total_vaults_count(), 0);
 }
 
 #[ink::test]
-fn same_caller_different_netuids_allowed() {
+fn same_caller_can_open_vaults_on_different_netuids() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     set_caller(accounts.alice);
     vault.set_approved_netuid(2, true).unwrap();
-    vault.deposit_alpha(100, 1).unwrap();
-    vault.deposit_alpha(200, 2).unwrap();
+    register_mock(1_000);
+    vault.create_alpha_vault(100, 1).unwrap();
+    vault.create_alpha_vault(200, 2).unwrap();
+    assert_eq!(vault.get_vaults_count(accounts.alice), 2);
 }
 
 #[ink::test]
@@ -231,17 +257,15 @@ fn vault_count_starts_at_zero() {
 // Auction / Liquidation flow tests
 // ---------------------------------------------------------------------------
 
-/// Creates a vault with 1000 alpha collateral via the two-step deposit flow.
+/// Creates a vault with the given alpha collateral via the atomic pull deposit.
 fn create_test_vault(
     vault: &mut TusdtVaultAlpha,
     owner: ink::primitives::AccountId,
     amount: u64,
 ) -> u32 {
     set_caller(owner);
-    vault.deposit_alpha(amount, 1).unwrap();
     register_mock(amount);
-    let vault_id = vault.create_alpha_vault(1).unwrap();
-    vault_id
+    vault.create_alpha_vault(amount, 1).unwrap()
 }
 
 #[ink::test]
@@ -284,7 +308,7 @@ fn vault_in_liquidation_blocks_operations() {
     // add_alpha_collateral should reject (vault in liquidation)
     set_caller(accounts.alice);
     register_mock(2_000);
-    let result = vault.add_alpha_collateral(vault_id);
+    let result = vault.add_alpha_collateral(vault_id, 2_000);
     assert_eq!(result, Err(Error::VaultInLiquidation));
 }
 
@@ -301,25 +325,12 @@ fn release_alpha_collateral_blocked_during_liquidation() {
 }
 
 #[ink::test]
-fn create_alpha_vault_checks_stake_availability() {
+fn create_alpha_vault_atomic_success() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     set_caller(accounts.alice);
-    vault.deposit_alpha(10_000_000, 1).unwrap();
-
-    // Mock reports only 5M staked — less than pending deposit + caps
-    register_mock(5_000_000);
-    let result = vault.create_alpha_vault(1);
-    assert_eq!(result, Err(Error::InsufficientCollateral));
-}
-
-#[ink::test]
-fn create_alpha_vault_succeeds_with_sufficient_stake() {
-    let (mut vault, accounts) = setup_with_approved_netuid();
-    set_caller(accounts.alice);
-    vault.deposit_alpha(10_000_000, 1).unwrap();
-
     register_mock(10_000_000);
-    let vault_id = vault.create_alpha_vault(1).unwrap();
+
+    let vault_id = vault.create_alpha_vault(10_000_000, 1).unwrap();
     assert_eq!(vault_id, 0);
     assert_eq!(vault.get_vaults_count(accounts.alice), 1);
     assert_eq!(vault.get_total_vaults_count(), 1);
@@ -331,29 +342,72 @@ fn create_alpha_vault_succeeds_with_sufficient_stake() {
 }
 
 #[ink::test]
-fn add_alpha_collateral_syncs_stake_delta() {
+fn race_two_users_credited_only_their_own_amount() {
+    // Regression for the old aggregate-check race: with the atomic pull, each
+    // caller's vault is backed by exactly the amount pulled from THEIR coldkey —
+    // cross-attribution is impossible by construction.
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    register_mock(2_000);
+
+    set_caller(accounts.alice);
+    let alice_vault = vault.create_alpha_vault(1_000, 1).unwrap();
+    set_caller(accounts.bob);
+    let bob_vault = vault.create_alpha_vault(1_000, 1).unwrap();
+
+    assert_eq!(
+        vault
+            .get_vault(accounts.alice, alice_vault)
+            .unwrap()
+            .collateral_balance,
+        1_000
+    );
+    assert_eq!(
+        vault
+            .get_vault(accounts.bob, bob_vault)
+            .unwrap()
+            .collateral_balance,
+        1_000
+    );
+}
+
+#[ink::test]
+fn add_alpha_collateral_pulls_exact_amount() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     let vault_id = create_test_vault(&mut vault, accounts.alice, 10_000_000);
 
-    // Simulate more stake transferred externally — mock now reports 15M
-    register_mock(15_000_000);
     set_caller(accounts.alice);
-    vault.add_alpha_collateral(vault_id).unwrap();
+    vault.add_alpha_collateral(vault_id, 5_000_000).unwrap();
 
     let stored = vault.get_vault(accounts.alice, vault_id).unwrap();
     assert_eq!(stored.collateral_balance, 15_000_000);
 }
 
 #[ink::test]
-fn add_alpha_collateral_rejects_if_no_new_stake() {
+fn add_alpha_collateral_rejects_zero_amount() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     let vault_id = create_test_vault(&mut vault, accounts.alice, 10_000_000);
 
-    // Mock still reports 10M — no new stake
-    register_mock(10_000_000);
     set_caller(accounts.alice);
-    let result = vault.add_alpha_collateral(vault_id);
-    assert_eq!(result, Err(Error::InsufficientCollateral));
+    assert_eq!(
+        vault.add_alpha_collateral(vault_id, 0),
+        Err(Error::InsufficientCollateral)
+    );
+}
+
+#[ink::test]
+fn add_alpha_collateral_pull_failure_leaves_vault_unchanged() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    let vault_id = create_test_vault(&mut vault, accounts.alice, 10_000_000);
+
+    register_mock_transfer_fails(10_000_000);
+    set_caller(accounts.alice);
+    assert_eq!(
+        vault.add_alpha_collateral(vault_id, 5_000_000),
+        Err(Error::StakeTransferFailed)
+    );
+
+    let stored = vault.get_vault(accounts.alice, vault_id).unwrap();
+    assert_eq!(stored.collateral_balance, 10_000_000);
 }
 
 // ── claim_excess_alpha ───────────────────────────────────────────────

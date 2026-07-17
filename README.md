@@ -176,16 +176,24 @@ no TS scripts yet — deploy and wire them with `cargo contract` as shown.
 
 ## Working Flow
 
-### 1) Vault lifecycle (two-step alpha deposit)
+### 1) Vault lifecycle (atomic pull deposit)
 
-1. User registers deposit intent: `deposit_alpha(amount, netuid)`.
-2. User transfers alpha stake to the vault contract via subtensor `transfer_stake` extrinsic (the vault becomes the new coldkey).
-3. User creates vault: `create_alpha_vault(netuid)` — verifies stake via chain extension and opens the CDP.
-4. User borrows token: `borrow_token(vault_id, amount)`.
-5. User repays token: `repay_token(vault_id, amount)`.
-6. Anyone can trigger debt accrual: `accrue_interest(owner, vault_id)`.
-7. User adds more alpha collateral: `add_alpha_collateral(vault_id)` — re-syncs stake from chain.
-8. User releases alpha collateral: `release_alpha_collateral(vault_id, amount, dest_coldkey)` — returns stake via chain extension.
+1. User stakes alpha under the vault's hotkey (if not already staked there) — the pull keeps the hotkey.
+2. User creates vault: `create_alpha_vault(amount, netuid)` — the contract atomically pulls `amount`
+   of the caller's alpha into its own coldkey via the caller-forwarded `caller_transfer_stake`
+   chain extension (function 25) and opens the CDP in the same message. Deposits are always
+   attributed to the caller; no separate intent or `transfer_stake` extrinsic is needed.
+   Requires the subnet's `TransferToggle` to be on and the amount to exceed the chain's minimum
+   stake (0.002 TAO equivalent); failures revert cleanly with `StakeTransferFailed`.
+3. User borrows token: `borrow_token(vault_id, amount)`.
+4. User repays token: `repay_token(vault_id, amount)`.
+5. Anyone can trigger debt accrual: `accrue_interest(owner, vault_id)`.
+6. User adds more alpha collateral: `add_alpha_collateral(vault_id, amount)` — pulls exactly
+   `amount` from the caller, same mechanism as vault creation.
+7. User releases alpha collateral: `release_alpha_collateral(vault_id, amount, dest_coldkey)` — returns stake via chain extension.
+
+Deposit messages are EOA-facing: a contract calling the vault would pull its own stake, since the
+chain extension forwards the immediate caller's origin.
 
 ### 2) Interest model
 
@@ -306,10 +314,10 @@ Each order tracks `status`: `Active` → `Fulfilled` or `Cancelled`.
 
 ### Coldkey model (no proxy)
 
-Alpha sellers transfer stake to the contract (which becomes the coldkey) via a two-step flow:
-1. `deposit_alpha(amount, netuid)` — register intent
-2. Transfer alpha stake to the contract via subtensor `transfer_stake` extrinsic
-3. `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` — creates the order
+Alpha sellers' stake is pulled into the contract (which becomes the coldkey) atomically:
+`create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` pulls
+`alpha_amount` of the caller's alpha (held under the contract's hotkey) via the caller-forwarded
+`caller_transfer_stake` chain extension in the same message — no separate deposit step.
 
 Buy orders using TUSDT require the maker to `approve` the contract first. Buy orders using native
 TAO send TAO with the `create_order` call.
@@ -318,7 +326,7 @@ TAO send TAO with the `create_order` call.
 
 Anyone (except the maker) can call `fulfill_order(order_id)` to execute a swap:
 - **Sell orders**: taker sends counter-collateral, receives alpha
-- **Buy orders**: taker deposits alpha (same two-step flow), receives the maker's locked collateral
+- **Buy orders**: the taker's alpha is pulled atomically at fulfillment, and the taker receives the maker's locked collateral
 
 Fees are deducted from the maker's side at fulfillment time, configurable by the owner.
 
@@ -326,9 +334,8 @@ Fees are deducted from the maker's side at fulfillment time, configurable by the
 
 | Method | Description |
 |--------|-------------|
-| `deposit_alpha(amount, netuid)` | Register alpha deposit intent |
-| `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` | Create order |
-| `fulfill_order(order_id)` | Execute swap (permissionless) |
+| `create_order(netuid, side, collateral, counter_collateral, price_bps, alpha_amount)` | Create order (Sell pulls the maker's alpha atomically) |
+| `fulfill_order(order_id)` | Execute swap (permissionless; Buy pulls the taker's alpha) |
 | `cancel_order(order_id)` | Cancel own order, return assets |
 | `update_fee_rate(bps)` | Owner: change fee rate |
 | `pause()` / `unpause()` | Owner: emergency control |
