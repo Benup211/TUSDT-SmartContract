@@ -76,23 +76,22 @@ cd tools
 yarn build:erc20-artifacts
 yarn build:auction-artifacts
 yarn build:oracle-artifacts
-yarn build:vault-alpha-artifacts
+yarn build:vault-artifacts
 yarn erc20:upload
 yarn auction:upload
 yarn oracle:upload
-yarn vault-alpha:upload
-yarn vault-alpha:deploy --token-code-hash <TOKEN_CODE_HASH> --auction-code-hash <AUCTION_CODE_HASH> --oracle-code-hash <ORACLE_CODE_HASH>
+yarn vault:upload
+yarn vault:deploy --token-code-hash <TOKEN_CODE_HASH> --auction-code-hash <AUCTION_CODE_HASH> --oracle-code-hash <ORACLE_CODE_HASH> --treasury-address <SS58> --oracle-netuid <NETUID> --hotkey <SS58>
 yarn test:oracle
 ```
 
 ## Deployment (Recommended Order)
 
 `tusdt-vault-alpha::new` takes a `treasury` address, code hashes for token/auction/oracle,
-`oracle_netuid` (subnet for oracle reporters), `hotkey` (staking hotkey for alpha collateral),
-and `alpha_price_netuid` (subnet whose alpha/TAO price to use for valuation). The vault instantiates
-the token, auction, and oracle internally. Because the vault *creates* the TUSDT token, the token
-address is not known until the vault exists — deploy the treasury after the vault and wire it in
-via `update_treasury`.
+`oracle_netuid` (subnet for oracle reporters), and `hotkey` (staking hotkey for alpha collateral).
+The vault instantiates the token, auction, and oracle internally. Because the vault *creates* the
+TUSDT token, the token address is not known until the vault exists — deploy the treasury after the
+vault and wire it in via `update_treasury`.
 
 1. Upload ERC20 code (`tusdt-erc20`) and capture code hash.
 2. Upload Auction code (`tusdt-auction`) and capture code hash.
@@ -104,7 +103,6 @@ via `update_treasury`.
    - `oracle_code_hash`
    - `oracle_netuid` — subnet whose registered neurons may submit oracle prices
    - `hotkey` — staking hotkey for alpha collateral deposits
-   - `alpha_price_netuid` — subnet whose alpha/TAO price to use for valuation (typically same as oracle_netuid)
 
    The deployer becomes the initial governance of the vault, auction, and oracle.
 5. Read the token / auction / oracle addresses from the vault (`get_token_address`,
@@ -119,8 +117,11 @@ via `update_treasury`.
     - `tusdt-treasury::set_governance(governance)`
     - `tusdt-vault-alpha::update_governance(governance)` — propagates to auction and oracle too.
 12. Seat the council: `tusdt-governance::set_council([c1..c5])`.
-13. Approve target subnets: `tusdt-vault-alpha::set_approved_netuid(N, true)` for each subnet.
-14. Configure per-netuid params: `tusdt-vault-alpha::set_contract_params(N, params)` for each subnet.
+13. Approve target subnets: `tusdt-governance::vault_set_approved_netuid(N, true)` for each subnet.
+14. Configure per-netuid params: `tusdt-governance::vault_set_contract_params(N, params)` for each
+    subnet (24h timelock, then anyone calls `tusdt-vault-alpha::execute_contract_params_update(N)`).
+15. (Optional) Adjust global params: `tusdt-governance::vault_set_global_params(config)` (24h
+    timelock, then anyone calls `tusdt-vault-alpha::execute_global_params_update()`).
 
 After step 11 the protocol contracts are steered exclusively by the governance contract, and within
 governance the maintainer/council split (see [Governance & Treasury](#governance--treasury)) applies.
@@ -209,25 +210,33 @@ the deployer; after wiring (deployment steps 7 & 9) it is the **governance contr
 them through governance's forwarders rather than calling the protocol contracts directly. See
 [Governance & Treasury](#governance--treasury) for who may invoke what.
 
-Risk params are **per-netuid** and applied behind a timelock. Governance calls
-`set_contract_params(netuid, params)` for each subnet. Params: `collateral_ratio`, `liquidation_ratio`,
-`interest_rate`, `liquidation_fee`, `transaction_fee`, `borrow_cap`, per-vault and total collateral
-caps, `auction_duration_ms`, `max_oracle_age_ms`. Falls back to defaults for unconfigured netuids.
+Risk params split into two scopes, both applied behind a 24h timelock:
 
-Governance also controls which subnets are accepted via `set_approved_netuid(netuid, approved)`.
+- **Per-netuid** — governance schedules `set_contract_params(netuid, params)` per subnet. Params:
+  `collateral_ratio`, `liquidation_ratio`, `interest_rate`, `liquidation_fee` (all basis points).
+  Falls back to defaults for unconfigured netuids.
+- **Global (all netuids)** — governance schedules `set_global_params(config)`. Params:
+  `transaction_fee` (basis points), `auction_duration_ms`, `max_oracle_age_ms`.
+
+Governance also controls which subnets are accepted via `set_approved_netuid(netuid, approved)`
+(exposed after hand-off through the `vault_set_approved_netuid` forwarder).
 
 Oracle reporter access (`set_reporter`) is managed by the oracle's validator; the validator and the
 max price deviation are governance-set. The active round is committed by the validator via
 `commit_round`; governance can also commit an emergency override price (see below).
 
-Default vault params:
+Default per-netuid params:
 
 - Collateral ratio: `150%`
 - Liquidation ratio: `120%`
-- Interest rate: `5% APR` (approximately `5.13% APY` under hourly compounding)
-- Liquidation fee: `1%`
-- Auction duration: `3_600_000` milliseconds
-- Max oracle age: `3_600_000` milliseconds
+- Interest rate: `10% APR` (approximately `10.52% APY` under hourly compounding)
+- Liquidation fee: `11%`
+
+Default global params:
+
+- Transaction fee: `0.3%` (30 bps)
+- Auction duration: `3_600_000` milliseconds (1 hour)
+- Max oracle age: `1_800_000` milliseconds (30 minutes)
 
 ## Governance & Treasury
 
@@ -260,6 +269,8 @@ governance:
 | Forwarder | Gated by | Target |
 | --- | --- | --- |
 | `vault_set_contract_params(netuid, params)`, `vault_cancel_contract_params_update(netuid)` | maintainer | vault-alpha (per-netuid timelocked params) |
+| `vault_set_global_params(config)`, `vault_cancel_global_params_update()` | maintainer | vault-alpha (global timelocked params: fee, auction duration, oracle age) |
+| `vault_set_approved_netuid(netuid, approved)` | maintainer | vault-alpha (accepted collateral subnets) |
 | `vault_update_treasury`, `vault_update_platform`, `vault_unpause` | maintainer | vault-alpha |
 | `vault_pause` | **council** (fast emergency halt) | vault-alpha |
 | `oracle_set_validator`, `oracle_set_max_price_deviation` | maintainer | oracle |
@@ -324,7 +335,7 @@ Fees are deducted from the maker's side at fulfillment time, configurable by the
 
 ## Useful Read Methods
 
-- Vault: `get_vault`, `get_total_debt`, `get_contract_params(netuid)`, `is_approved_netuid(netuid)`, `alpha_price_netuid()`, `get_oracle_address`, `get_vaults`, `get_all_vaults`
+- Vault: `get_vault`, `get_total_debt`, `get_contract_params(netuid)`, `get_global_params()`, `is_approved_netuid(netuid)`, `get_oracle_address`, `get_vaults`, `get_all_vaults`
 - Oracle: `get_latest_price`, `get_current_round_summary`, `is_reporter`
 - Chain extension: `get_alpha_price(netuid)` — on-chain subnet alpha/TAO price (RAO-scaled by 1e9)
 - Oracle: `get_latest_price`, `get_current_round_summary`, `is_reporter`

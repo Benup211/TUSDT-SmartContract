@@ -4,13 +4,10 @@ const DEFAULT_COLLATERAL_RATIO_BASIS_POINTS: u32 = 15_000;
 const DEFAULT_LIQUIDATION_RATIO_BASIS_POINTS: u32 = 12_000;
 const DEFAULT_INTEREST_RATE_BASIS_POINTS: u32 = 1_000;
 const DEFAULT_LIQUIDATION_FEE_BASIS_POINTS: u32 = 1_100;
-const DEFAULT_BORROW_CAP: Balance = 5_000_000_000_000;
-const DEFAULT_MIN_VAULT_COLLATERAL: Balance = 5_000_000;
-const DEFAULT_MAX_VAULT_COLLATERAL: Balance = 1_000_000_000;
-const DEFAULT_MAX_TOTAL_COLLATERAL: Balance = 21_000_000_000;
 const DEFAULT_TRANSACTION_FEE_BASIS_POINTS: u32 = 30;
 const DEFAULT_AUCTION_DURATION_MS: u64 = 3_600_000;
 const DEFAULT_MAX_ORACLE_AGE_MS: u64 = 1_800_000;
+const MIN_AUCTION_DURATION_MS: u64 = 60_000;
 const MAX_AUCTION_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 impl TusdtVaultAlpha {
@@ -20,13 +17,6 @@ impl TusdtVaultAlpha {
             liquidation_ratio: Ratio::from_basis_points(DEFAULT_LIQUIDATION_RATIO_BASIS_POINTS),
             interest_rate: Ratio::from_basis_points(DEFAULT_INTEREST_RATE_BASIS_POINTS),
             liquidation_fee: Ratio::from_basis_points(DEFAULT_LIQUIDATION_FEE_BASIS_POINTS),
-            borrow_cap: DEFAULT_BORROW_CAP,
-            min_vault_collateral: DEFAULT_MIN_VAULT_COLLATERAL,
-            max_vault_collateral: DEFAULT_MAX_VAULT_COLLATERAL,
-            max_total_collateral: DEFAULT_MAX_TOTAL_COLLATERAL,
-            transaction_fee: Ratio::from_basis_points(DEFAULT_TRANSACTION_FEE_BASIS_POINTS),
-            auction_duration_ms: DEFAULT_AUCTION_DURATION_MS,
-            max_oracle_age_ms: DEFAULT_MAX_ORACLE_AGE_MS,
         };
         Self::validate_contract_params(&params)
             .expect("default vault contract params should be valid");
@@ -41,13 +31,6 @@ impl TusdtVaultAlpha {
             liquidation_ratio: Ratio::from_basis_points(params.liquidation_ratio),
             interest_rate: Ratio::from_basis_points(params.interest_rate),
             liquidation_fee: Ratio::from_basis_points(params.liquidation_fee),
-            borrow_cap: params.borrow_cap,
-            min_vault_collateral: params.min_vault_collateral,
-            max_vault_collateral: params.max_vault_collateral,
-            max_total_collateral: params.max_total_collateral,
-            transaction_fee: Ratio::from_basis_points(params.transaction_fee),
-            auction_duration_ms: params.auction_duration_ms,
-            max_oracle_age_ms: params.max_oracle_age_ms,
         };
         Self::validate_contract_params(&config)?;
         Ok(config)
@@ -73,16 +56,6 @@ impl TusdtVaultAlpha {
                 .liquidation_fee
                 .to_basis_points()
                 .expect("stored liquidation fee should fit in u32 basis points"),
-            borrow_cap: params.borrow_cap,
-            min_vault_collateral: params.min_vault_collateral,
-            max_vault_collateral: params.max_vault_collateral,
-            max_total_collateral: params.max_total_collateral,
-            transaction_fee: params
-                .transaction_fee
-                .to_basis_points()
-                .expect("stored transaction fee should fit in u32 basis points"),
-            auction_duration_ms: params.auction_duration_ms,
-            max_oracle_age_ms: params.max_oracle_age_ms,
         }
     }
 
@@ -103,10 +76,48 @@ impl TusdtVaultAlpha {
         if params.liquidation_fee > one {
             return Err(Error::InvalidRatio);
         }
-        if params.transaction_fee > one {
+        Ok(())
+    }
+
+    pub(crate) fn default_global_params() -> VaultGlobalParams {
+        let params = VaultGlobalParams {
+            transaction_fee: Ratio::from_basis_points(DEFAULT_TRANSACTION_FEE_BASIS_POINTS),
+            auction_duration_ms: DEFAULT_AUCTION_DURATION_MS,
+            max_oracle_age_ms: DEFAULT_MAX_ORACLE_AGE_MS,
+        };
+        Self::validate_global_params(&params)
+            .expect("default vault global params should be valid");
+        params
+    }
+
+    pub(crate) fn global_params_from_config(
+        config: VaultGlobalParamsConfig,
+    ) -> Result<VaultGlobalParams> {
+        let params = VaultGlobalParams {
+            transaction_fee: Ratio::from_basis_points(config.transaction_fee),
+            auction_duration_ms: config.auction_duration_ms,
+            max_oracle_age_ms: config.max_oracle_age_ms,
+        };
+        Self::validate_global_params(&params)?;
+        Ok(params)
+    }
+
+    pub(crate) fn global_params_to_config(params: VaultGlobalParams) -> VaultGlobalParamsConfig {
+        VaultGlobalParamsConfig {
+            transaction_fee: params
+                .transaction_fee
+                .to_basis_points()
+                .expect("stored transaction fee should fit in u32 basis points"),
+            auction_duration_ms: params.auction_duration_ms,
+            max_oracle_age_ms: params.max_oracle_age_ms,
+        }
+    }
+
+    pub(crate) fn validate_global_params(params: &VaultGlobalParams) -> Result<()> {
+        if params.transaction_fee > Ratio::one() {
             return Err(Error::InvalidRatio);
         }
-        if params.auction_duration_ms < 60_000 {
+        if params.auction_duration_ms < MIN_AUCTION_DURATION_MS {
             return Err(Error::InvalidAuctionDuration);
         }
         if params.auction_duration_ms > MAX_AUCTION_DURATION_MS {
@@ -114,15 +125,6 @@ impl TusdtVaultAlpha {
         }
         if params.max_oracle_age_ms == 0 {
             return Err(Error::InvalidOracleMaxAge);
-        }
-        if params.min_vault_collateral == 0 {
-            return Err(Error::InvalidRatio);
-        }
-        if params.max_vault_collateral < params.min_vault_collateral {
-            return Err(Error::InvalidRatio);
-        }
-        if params.max_total_collateral < params.max_vault_collateral {
-            return Err(Error::InvalidRatio);
         }
         Ok(())
     }

@@ -17,7 +17,7 @@ mod governance {
     use tusdt_oracle::{PriceData, TusdtOracleRef};
     use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
-    use tusdt_vault_alpha::{TusdtVaultAlphaRef, VaultContractParamsConfig};
+    use tusdt_vault_alpha::{TusdtVaultAlphaRef, VaultContractParamsConfig, VaultGlobalParamsConfig};
 
     // Cross-contract forwarders that let governance drive the vault, auction, and oracle.
     // `forward_*` helpers defined here.
@@ -474,6 +474,24 @@ mod governance {
         #[ink(message)]
         pub fn vault_claim_excess_alpha(&mut self, netuid: u16) -> Result<()> {
             self.forward_vault_claim_excess_alpha(netuid)
+        }
+
+        /// Approves or removes a netuid for vault alpha collateral; maintainer-only.
+        #[ink(message)]
+        pub fn vault_set_approved_netuid(&mut self, netuid: u16, approved: bool) -> Result<()> {
+            self.forward_vault_set_approved_netuid(netuid, approved)
+        }
+
+        /// Schedules a vault global-parameter update (24h timelock); maintainer-only.
+        #[ink(message)]
+        pub fn vault_set_global_params(&mut self, config: VaultGlobalParamsConfig) -> Result<()> {
+            self.forward_vault_set_global_params(config)
+        }
+
+        /// Cancels the vault's currently scheduled global-parameter update; maintainer-only.
+        #[ink(message)]
+        pub fn vault_cancel_global_params_update(&mut self) -> Result<()> {
+            self.forward_vault_cancel_global_params_update()
         }
 
         /// Pauses the vault; council-only (operational/emergency halt).

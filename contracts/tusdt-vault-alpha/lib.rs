@@ -1,6 +1,8 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
 
-pub use self::vault::{TusdtVaultAlpha, TusdtVaultAlphaRef, VaultContractParamsConfig};
+pub use self::vault::{
+    TusdtVaultAlpha, TusdtVaultAlphaRef, VaultContractParamsConfig, VaultGlobalParamsConfig,
+};
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
 mod vault {
@@ -47,7 +49,7 @@ mod vault {
         pub last_interest_accrued_at: u64,
     }
 
-    /// Internal representation of risk and fee parameters used by the vault.
+    /// Internal representation of per-netuid risk parameters used by the vault.
     #[derive(Debug, Copy, Clone)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -56,31 +58,17 @@ mod vault {
         pub liquidation_ratio: Ratio,
         pub interest_rate: Ratio,
         pub liquidation_fee: Ratio,
-        pub borrow_cap: Balance,
-        pub min_vault_collateral: Balance,
-        pub max_vault_collateral: Balance,
-        pub max_total_collateral: Balance,
-        pub transaction_fee: Ratio,
-        pub auction_duration_ms: u64,
-        pub max_oracle_age_ms: u64,
     }
 
     #[derive(Debug, Copy, Clone)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
-    /// External config uses basis points for ratio fields, where `100 = 1%`.
+    /// External per-netuid config uses basis points for ratio fields, where `100 = 1%`.
     pub struct VaultContractParamsConfig {
         pub collateral_ratio: u32,
         pub liquidation_ratio: u32,
         pub interest_rate: u32,
         pub liquidation_fee: u32,
-        pub borrow_cap: Balance,
-        pub min_vault_collateral: Balance,
-        pub max_vault_collateral: Balance,
-        pub max_total_collateral: Balance,
-        pub transaction_fee: u32,
-        pub auction_duration_ms: u64,
-        pub max_oracle_age_ms: u64,
     }
 
     /// A queued parameter update awaiting timelock expiry before it can be executed.
@@ -89,6 +77,35 @@ mod vault {
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct PendingContractParamsUpdate {
         pub params: VaultContractParamsConfig,
+        pub execute_after: u64,
+    }
+
+    /// Internal representation of contract-wide (netuid-independent) parameters.
+    #[derive(Debug, Copy, Clone)]
+    #[ink::scale_derive(Decode, Encode, TypeInfo)]
+    #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
+    pub struct VaultGlobalParams {
+        pub transaction_fee: Ratio,
+        pub auction_duration_ms: u64,
+        pub max_oracle_age_ms: u64,
+    }
+
+    #[derive(Debug, Copy, Clone)]
+    #[ink::scale_derive(Decode, Encode, TypeInfo)]
+    #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
+    /// External global config uses basis points for the fee field, where `100 = 1%`.
+    pub struct VaultGlobalParamsConfig {
+        pub transaction_fee: u32,
+        pub auction_duration_ms: u64,
+        pub max_oracle_age_ms: u64,
+    }
+
+    /// A queued global-parameter update awaiting timelock expiry.
+    #[derive(Debug, Copy, Clone)]
+    #[ink::scale_derive(Decode, Encode, TypeInfo)]
+    #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
+    pub struct PendingGlobalParamsUpdate {
+        pub params: VaultGlobalParamsConfig,
         pub execute_after: u64,
     }
 
@@ -112,9 +129,6 @@ mod vault {
         /// The hotkey where all alpha collateral for this vault instance is staked.
         vault_hotkey: AccountId,
 
-        /// The subnet whose alpha price is used for collateral valuation.
-        alpha_price_netuid: u16,
-
         /// Set of netuids whose alpha is accepted as collateral. Managed by governance.
         approved_netuids: Mapping<u16, ()>,
 
@@ -124,6 +138,10 @@ mod vault {
 
         netuid_params: Mapping<u16, VaultContractParams>,
         pending_contract_params_updates: Mapping<u16, PendingContractParamsUpdate>,
+
+        /// Contract-wide parameters shared by all netuids.
+        global_params: VaultGlobalParams,
+        pending_global_params_update: Option<PendingGlobalParamsUpdate>,
 
         vaults: Mapping<(AccountId, u32), Vault>,
         owner_total_debt: Mapping<AccountId, Balance>,
@@ -218,6 +236,22 @@ mod vault {
     }
 
     #[ink(event)]
+    pub struct GlobalParamsUpdateScheduled {
+        params: VaultGlobalParamsConfig,
+        execute_after: u64,
+    }
+
+    #[ink(event)]
+    pub struct GlobalParamsUpdated {
+        params: VaultGlobalParamsConfig,
+    }
+
+    #[ink(event)]
+    pub struct GlobalParamsUpdateCancelled {
+        params: VaultGlobalParamsConfig,
+    }
+
+    #[ink(event)]
     pub struct VaultGovernanceUpdated {
         #[ink(topic)]
         previous_governance: AccountId,
@@ -293,7 +327,6 @@ mod vault {
     pub enum Error {
         VaultNotFound,
         InsufficientCollateral,
-        CollateralCapExceeded,
         NotVaultOwner,
         TransferFailed,
         InsufficientTokenBalance,
@@ -303,7 +336,6 @@ mod vault {
         InvalidAuctionDuration,
         CollateralRatioExceeded,
         LiquidationRatioExceeded,
-        BorrowCapExceeded,
         RepayAmountTooHigh,
         VaultInLiquidation,
         NotLiquidatable,
@@ -341,10 +373,9 @@ mod vault {
 
     impl TusdtVaultAlpha {
         /// Initializes the alpha vault. `hotkey` is the single staking position for this
-        /// vault instance. `alpha_price_netuid` specifies which subnet's alpha price to use
-        /// for valuation — typically 0 (root, 1:1 with TAO). `oracle_netuid` is the subnet
-        /// whose registered neurons may submit oracle prices. Governance must call
-        /// `set_approved_netuid` to enable vault creation for specific subnets.
+        /// vault instance. `oracle_netuid` is the subnet whose registered neurons may
+        /// submit oracle prices. Governance must call `set_approved_netuid` to enable
+        /// vault creation for specific subnets.
         #[ink(constructor)]
         pub fn new(
             treasury: AccountId,
@@ -353,7 +384,6 @@ mod vault {
             oracle_code_hash: Hash,
             oracle_netuid: u16,
             hotkey: AccountId,
-            alpha_price_netuid: u16,
         ) -> Self {
             let governance = Self::env().caller();
 
@@ -384,11 +414,12 @@ mod vault {
                 oracle,
                 total_collateral_balance: 0,
                 vault_hotkey: hotkey,
-                alpha_price_netuid,
                 approved_netuids: Mapping::default(),
                 netuid_total_collateral: Mapping::default(),
                 netuid_params: Mapping::default(),
                 pending_contract_params_updates: Mapping::default(),
+                global_params: Self::default_global_params(),
+                pending_global_params_update: None,
                 vaults: Mapping::default(),
                 owner_total_debt: Mapping::default(),
                 vault_count: Mapping::default(),
@@ -471,6 +502,69 @@ mod vault {
             Ok(())
         }
 
+        /// Schedules a global (contract-wide) parameter update with the standard timelock.
+        /// Only governance may call.
+        #[ink(message)]
+        pub fn set_global_params(&mut self, config: VaultGlobalParamsConfig) -> Result<()> {
+            self.ensure_governance()?;
+
+            Self::global_params_from_config(config)?;
+
+            let execute_after = self
+                .env()
+                .block_timestamp()
+                .checked_add(CONTRACT_PARAMS_TIMELOCK_MS)
+                .ok_or(Error::ArithmeticError)?;
+            self.pending_global_params_update = Some(PendingGlobalParamsUpdate {
+                params: config,
+                execute_after,
+            });
+
+            self.env().emit_event(GlobalParamsUpdateScheduled {
+                params: config,
+                execute_after,
+            });
+
+            Ok(())
+        }
+
+        /// Executes the currently scheduled global-parameter update once its timelock has elapsed.
+        #[ink(message)]
+        pub fn execute_global_params_update(&mut self) -> Result<()> {
+            let pending = self
+                .pending_global_params_update
+                .ok_or(Error::NoPendingContractParamsUpdate)?;
+            if self.env().block_timestamp() < pending.execute_after {
+                return Err(Error::ContractParamsUpdateTimelockActive);
+            }
+
+            self.global_params = Self::global_params_from_config(pending.params)?;
+            self.pending_global_params_update = None;
+
+            self.env().emit_event(GlobalParamsUpdated {
+                params: pending.params,
+            });
+
+            Ok(())
+        }
+
+        /// Cancels the currently scheduled global-parameter update. Governance only.
+        #[ink(message)]
+        pub fn cancel_global_params_update(&mut self) -> Result<()> {
+            self.ensure_governance()?;
+
+            let pending = self
+                .pending_global_params_update
+                .take()
+                .ok_or(Error::NoPendingContractParamsUpdate)?;
+
+            self.env().emit_event(GlobalParamsUpdateCancelled {
+                params: pending.params,
+            });
+
+            Ok(())
+        }
+
         #[ink(message)]
         pub fn update_governance(&mut self, new_governance: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -535,13 +629,6 @@ mod vault {
             self.paused = false;
             self.env().emit_event(Unpaused {});
 
-            Ok(())
-        }
-
-        #[ink(message)]
-        pub fn set_alpha_price_netuid(&mut self, netuid: u16) -> Result<()> {
-            self.ensure_governance()?;
-            self.alpha_price_netuid = netuid;
             Ok(())
         }
 
@@ -776,7 +863,7 @@ mod vault {
                 self.save_vault(caller, vault_id, &vault)?;
                 return Ok(());
             }
-            let fee = self.calculate_transaction_fee(vault.netuid, amount)?;
+            let fee = self.calculate_transaction_fee(amount)?;
             let net_borrow_amount = amount.checked_sub(fee).ok_or(Error::ArithmeticError)?;
 
             let price = self.current_collateral_price(vault.netuid)?;
@@ -792,14 +879,6 @@ mod vault {
                 .ok_or(Error::ArithmeticError)?;
             if projected_debt > max_borrow {
                 return Err(Error::CollateralRatioExceeded);
-            }
-            let projected_total_supply = self
-                .token
-                .total_supply()
-                .checked_add(amount)
-                .ok_or(Error::ArithmeticError)?;
-            if projected_total_supply > self.get_params(vault.netuid).borrow_cap {
-                return Err(Error::BorrowCapExceeded);
             }
 
             if net_borrow_amount > 0 {
@@ -843,7 +922,7 @@ mod vault {
             if amount > vault.debt_balance {
                 return Err(Error::RepayAmountTooHigh);
             }
-            let fee = self.calculate_transaction_fee(vault.netuid, amount)?;
+            let fee = self.calculate_transaction_fee(amount)?;
             let total_token_charge = amount.checked_add(fee).ok_or(Error::ArithmeticError)?;
             self.ensure_token_balance_at_least(caller, total_token_charge)?;
 
@@ -1000,9 +1079,7 @@ mod vault {
                 .extension()
                 .get_alpha_price(vault.netuid)
                 .map_err(|_| Error::ChainExtensionFailed)?;
-            let alpha_to_tao = Ratio::from_inner(u128::from(alpha_price_rao))
-                .checked_div_int(1_000_000_000u128)
-                .ok_or(Error::ArithmeticError)?;
+            let alpha_to_tao = Self::alpha_price_rao_to_ratio(alpha_price_rao)?;
             let tao_received = alpha_to_tao
                 .checked_mul_value(u128::from(collateral_amount))
                 .ok_or(Error::ArithmeticError)?;
@@ -1039,7 +1116,7 @@ mod vault {
                     vault.debt_balance,
                     min_bid,
                     price,
-                    Some(self.get_params(vault.netuid).auction_duration_ms),
+                    Some(self.global_params.auction_duration_ms),
                 )
                 .map_err(|_| Error::AuctionContractCallFailed)?;
 
@@ -1084,7 +1161,7 @@ mod vault {
 
             let mut vault = self.load_vault(owner, vault_id)?;
             let collateral_sold = auction.collateral_balance;
-            let transaction_fee = self.calculate_transaction_fee(vault.netuid, collateral_sold)?;
+            let transaction_fee = self.calculate_transaction_fee(collateral_sold)?;
             let debt_cleared = auction.debt_balance;
             let payment = Self::apply_debt_payment(&mut vault, debt_cleared)?;
 
@@ -1176,13 +1253,13 @@ mod vault {
         }
 
         #[ink(message)]
-        pub fn alpha_price_netuid(&self) -> u16 {
-            self.alpha_price_netuid
+        pub fn get_contract_params(&self, netuid: u16) -> VaultContractParamsConfig {
+            Self::contract_params_to_config(self.get_params(netuid))
         }
 
         #[ink(message)]
-        pub fn get_contract_params(&self, netuid: u16) -> VaultContractParamsConfig {
-            Self::contract_params_to_config(self.get_params(netuid))
+        pub fn get_global_params(&self) -> VaultGlobalParamsConfig {
+            Self::global_params_to_config(self.global_params)
         }
 
         #[ink(message)]
@@ -1339,7 +1416,7 @@ mod vault {
             let price_data = Self::validate_price_data(
                 self.oracle.get_latest_price(),
                 self.env().block_timestamp(),
-                self.get_params(netuid).max_oracle_age_ms,
+                self.global_params.max_oracle_age_ms,
             )?;
             let tusdt_per_tao = price_data.price;
 
@@ -1351,9 +1428,7 @@ mod vault {
                 .map_err(|_| Error::ChainExtensionFailed)?;
 
             // Convert: alpha_to_tao = alpha_price_rao / 1_000_000_000
-            let alpha_to_tao = Ratio::from_inner(u128::from(alpha_price_rao))
-                .checked_div_int(1_000_000_000u128)
-                .ok_or(Error::ArithmeticError)?;
+            let alpha_to_tao = Self::alpha_price_rao_to_ratio(alpha_price_rao)?;
 
             // TUSDT per alpha = TUSDT per TAO × (alpha per TAO)
             tusdt_per_tao
@@ -1431,15 +1506,21 @@ mod vault {
                 .ok_or(Error::ArithmeticError)
         }
 
-        pub(crate) fn calculate_transaction_fee(
-            &self,
-            netuid: u16,
-            amount: Balance,
-        ) -> Result<Balance> {
-            self.get_params(netuid)
+        pub(crate) fn calculate_transaction_fee(&self, amount: Balance) -> Result<Balance> {
+            self.global_params
                 .transaction_fee
                 .checked_mul_value(amount.into())
                 .and_then(|fee| Balance::try_from(fee).ok())
+                .ok_or(Error::ArithmeticError)
+        }
+
+        /// Converts a raw alpha price from the chain extension (function 15, RAO per
+        /// alpha — TAO/alpha scaled by 1e9) into a `Ratio` of TAO per alpha.
+        /// E.g. `377_277` → `0.000377277`, `1_000_000_000` → `1.0`.
+        #[inline]
+        pub(crate) fn alpha_price_rao_to_ratio(alpha_price_rao: u64) -> Result<Ratio> {
+            Ratio::from_integer(u128::from(alpha_price_rao))
+                .checked_div_int(1_000_000_000u128)
                 .ok_or(Error::ArithmeticError)
         }
 
@@ -1533,11 +1614,12 @@ mod vault {
                 oracle: TusdtOracleRef::from_account_id(accounts.eve),
                 total_collateral_balance: 0,
                 vault_hotkey: accounts.bob,
-                alpha_price_netuid: 0,
                 approved_netuids: Mapping::default(),
                 netuid_total_collateral: Mapping::default(),
                 netuid_params: Mapping::default(),
                 pending_contract_params_updates: Mapping::default(),
+                global_params: Self::default_global_params(),
+                pending_global_params_update: None,
                 vaults: Mapping::default(),
                 owner_total_debt: Mapping::default(),
                 vault_count: Mapping::default(),

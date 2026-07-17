@@ -112,7 +112,6 @@ fn register_mock_no_stake() {
 fn constructor_sets_governance() {
     let (vault, accounts) = setup();
     assert_eq!(vault.governance(), accounts.alice);
-    assert_eq!(vault.alpha_price_netuid(), 0);
 }
 
 #[ink::test]
@@ -401,4 +400,362 @@ fn claim_excess_alpha_noop_when_no_stake_on_netuid() {
     register_mock_no_stake();
     set_caller(accounts.alice);
     vault.claim_excess_alpha(1).unwrap(); // Should succeed as no-op
+}
+
+// ---------------------------------------------------------------------------
+// Pricing / borrow-limit math
+//
+// `borrow_token` itself calls the oracle child contract, which the off-chain
+// test environment cannot execute; the risk functions take `price: Ratio` as a
+// parameter, so the math is exercised directly with constructed prices.
+// ---------------------------------------------------------------------------
+
+use tusdt_primitives::Ratio;
+
+fn set_time(timestamp: u64) {
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(timestamp);
+}
+
+/// Sets per-netuid collateral/liquidation ratios through the real timelocked
+/// path: schedule as governance, advance past the 24h timelock, execute.
+fn configure_ratios(
+    vault: &mut TusdtVaultAlpha,
+    governance: ink::primitives::AccountId,
+    netuid: u16,
+    cr_bps: u32,
+    lr_bps: u32,
+) {
+    set_caller(governance);
+    let mut config = vault.get_contract_params(netuid);
+    config.collateral_ratio = cr_bps;
+    config.liquidation_ratio = lr_bps;
+    vault.set_contract_params(netuid, config).unwrap();
+    set_time(24 * 60 * 60 * 1_000 + 1);
+    vault.execute_contract_params_update(netuid).unwrap();
+}
+
+// ── alpha_price_rao_to_ratio ─────────────────────────────────────────
+
+#[ink::test]
+fn alpha_price_to_ratio_realistic() {
+    // 377_277 RAO per alpha = 0.000377277 TAO per alpha
+    let ratio = TusdtVaultAlpha::alpha_price_rao_to_ratio(377_277).unwrap();
+    assert!(!ratio.is_zero());
+    // Multiplying back by 1e9 recovers the raw RAO value exactly.
+    assert_eq!(ratio.checked_mul_value(1_000_000_000), Some(377_277));
+}
+
+#[ink::test]
+fn alpha_price_to_ratio_one_to_one() {
+    // 1_000_000_000 RAO = 1 alpha = 1 TAO
+    let ratio = TusdtVaultAlpha::alpha_price_rao_to_ratio(1_000_000_000).unwrap();
+    assert_eq!(ratio, Ratio::one());
+}
+
+#[ink::test]
+fn alpha_price_to_ratio_zero() {
+    let ratio = TusdtVaultAlpha::alpha_price_rao_to_ratio(0).unwrap();
+    assert!(ratio.is_zero());
+}
+
+#[ink::test]
+fn alpha_price_to_ratio_max_u64_no_overflow() {
+    let ratio = TusdtVaultAlpha::alpha_price_rao_to_ratio(u64::MAX).unwrap();
+    assert!(!ratio.is_zero());
+}
+
+// ── collateral_value ─────────────────────────────────────────────────
+
+#[ink::test]
+fn collateral_value_basic() {
+    // price 0.1 TUSDT per alpha unit × 1000 units = 100
+    let price = Ratio::from_basis_points(1_000);
+    assert_eq!(TusdtVaultAlpha::collateral_value(price, 1_000).unwrap(), 100);
+}
+
+#[ink::test]
+fn collateral_value_zero_price() {
+    let price = TusdtVaultAlpha::alpha_price_rao_to_ratio(0).unwrap();
+    assert_eq!(TusdtVaultAlpha::collateral_value(price, 1_000).unwrap(), 0);
+}
+
+// ── max_borrow_allowed ───────────────────────────────────────────────
+
+#[ink::test]
+fn max_borrow_allowed_spec_example() {
+    // 1000 alpha (1_000_000_000_000 rao), oracle 200 TUSDT/TAO, alpha price
+    // 377_277 rao (0.000377277 TAO/alpha), collateral ratio 5× (50_000 bps):
+    //   value = 1000 × 200 × 0.000377277 = 75.4554 TUSDT
+    //   max borrow = 75.4554 / 5 = 15.09108 TUSDT = 15_091_080_000 units
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    configure_ratios(&mut vault, accounts.alice, 1, 50_000, 20_000);
+
+    let alpha_to_tao = TusdtVaultAlpha::alpha_price_rao_to_ratio(377_277).unwrap();
+    let price = Ratio::from_integer(200).checked_mul(alpha_to_tao).unwrap();
+
+    let value = TusdtVaultAlpha::collateral_value(price, 1_000_000_000_000).unwrap();
+    assert_eq!(value, 75_455_400_000);
+
+    let max_borrow = vault
+        .max_borrow_allowed(1, price, 1_000_000_000_000)
+        .unwrap();
+    assert_eq!(max_borrow, 15_091_080_000);
+}
+
+#[ink::test]
+fn max_borrow_allowed_default_collateral_ratio() {
+    // Default CR = 15_000 bps (1.5×): 1000 / 1.5 = 666 (floor)
+    let (vault, _accounts) = setup_with_approved_netuid();
+    let price = Ratio::one();
+    assert_eq!(vault.max_borrow_allowed(1, price, 1_000).unwrap(), 666);
+}
+
+#[ink::test]
+fn max_borrow_allowed_uses_per_netuid_ratio() {
+    // Netuid 2 gets CR 5× while netuid 1 keeps the 1.5× default; the same
+    // price and collateral must yield different borrow limits.
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+    vault.set_approved_netuid(2, true).unwrap();
+    configure_ratios(&mut vault, accounts.alice, 2, 50_000, 20_000);
+
+    let alpha_to_tao = TusdtVaultAlpha::alpha_price_rao_to_ratio(377_277).unwrap();
+    let price = Ratio::from_integer(200).checked_mul(alpha_to_tao).unwrap();
+
+    let max_default = vault
+        .max_borrow_allowed(1, price, 1_000_000_000_000)
+        .unwrap();
+    let max_custom = vault
+        .max_borrow_allowed(2, price, 1_000_000_000_000)
+        .unwrap();
+    assert_eq!(max_default, 50_303_600_000); // 75.4554 / 1.5
+    assert_eq!(max_custom, 15_091_080_000); // 75.4554 / 5
+}
+
+#[ink::test]
+fn max_borrow_allowed_rounds_down() {
+    // CR 3× on 100 at price 1.0 → 33.33… floors to 33
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    configure_ratios(&mut vault, accounts.alice, 1, 30_000, 20_000);
+    let price = Ratio::one();
+    assert_eq!(vault.max_borrow_allowed(1, price, 100).unwrap(), 33);
+}
+
+// ── liquidation limit / is_liquidatable ──────────────────────────────
+
+#[ink::test]
+fn liquidation_limit_default_ratio() {
+    // Default LR = 12_000 bps (1.2×): 1000 / 1.2 = 833 (floor)
+    let (vault, _accounts) = setup_with_approved_netuid();
+    let price = Ratio::one();
+    assert_eq!(vault.liquidation_limit(1, price, 1_000).unwrap(), 833);
+}
+
+#[ink::test]
+fn liquidation_limit_custom_ratio() {
+    // LR 2× (20_000 bps): 1000 / 2 = 500
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    configure_ratios(&mut vault, accounts.alice, 1, 50_000, 20_000);
+    let price = Ratio::one();
+    assert_eq!(vault.liquidation_limit(1, price, 1_000).unwrap(), 500);
+}
+
+#[ink::test]
+fn is_liquidatable_boundary() {
+    // Default LR 1.2×, collateral 1000 at price 1.0 → limit 833.
+    // Debt 834 is liquidatable; debt at the limit (833) is not.
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    let vault_id = create_test_vault(&mut vault, accounts.alice, 10_000_000);
+    let mut stored = vault.get_vault(accounts.alice, vault_id).unwrap();
+    stored.collateral_balance = 1_000;
+    let price = Ratio::one();
+
+    stored.debt_balance = 834;
+    assert!(vault.is_liquidatable(price, &stored).unwrap());
+
+    stored.debt_balance = 833;
+    assert!(!vault.is_liquidatable(price, &stored).unwrap());
+}
+
+#[ink::test]
+fn liquidation_min_bid_includes_fee() {
+    // Default liquidation fee 11% (1_100 bps): 1000 debt → min bid 1110
+    let (vault, _accounts) = setup_with_approved_netuid();
+    assert_eq!(vault.liquidation_min_bid(1, 1_000).unwrap(), 1_110);
+}
+
+// ---------------------------------------------------------------------------
+// Global (contract-wide) params: defaults, gating, timelock, validation
+// ---------------------------------------------------------------------------
+
+fn default_global_config() -> VaultGlobalParamsConfig {
+    VaultGlobalParamsConfig {
+        transaction_fee: 30,
+        auction_duration_ms: 3_600_000,
+        max_oracle_age_ms: 1_800_000,
+    }
+}
+
+#[ink::test]
+fn global_params_defaults() {
+    let (vault, _accounts) = setup();
+    let params = vault.get_global_params();
+    assert_eq!(params.transaction_fee, 30);
+    assert_eq!(params.auction_duration_ms, 3_600_000);
+    assert_eq!(params.max_oracle_age_ms, 1_800_000);
+}
+
+#[ink::test]
+fn set_global_params_rejects_non_governance() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.bob);
+    assert_eq!(
+        vault.set_global_params(default_global_config()),
+        Err(Error::NotGovernance)
+    );
+}
+
+#[ink::test]
+fn execute_global_params_before_timelock_fails() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.transaction_fee = 50;
+    vault.set_global_params(config).unwrap();
+
+    assert_eq!(
+        vault.execute_global_params_update(),
+        Err(Error::ContractParamsUpdateTimelockActive)
+    );
+}
+
+#[ink::test]
+fn execute_global_params_after_timelock_applies() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.transaction_fee = 50;
+    config.auction_duration_ms = 7_200_000;
+    config.max_oracle_age_ms = 900_000;
+    vault.set_global_params(config).unwrap();
+
+    set_time(24 * 60 * 60 * 1_000 + 1);
+    // Execute is permissionless.
+    set_caller(accounts.bob);
+    vault.execute_global_params_update().unwrap();
+
+    let params = vault.get_global_params();
+    assert_eq!(params.transaction_fee, 50);
+    assert_eq!(params.auction_duration_ms, 7_200_000);
+    assert_eq!(params.max_oracle_age_ms, 900_000);
+}
+
+#[ink::test]
+fn execute_global_params_without_pending_fails() {
+    let (mut vault, _accounts) = setup();
+    assert_eq!(
+        vault.execute_global_params_update(),
+        Err(Error::NoPendingContractParamsUpdate)
+    );
+}
+
+#[ink::test]
+fn cancel_global_params_update_rejects_non_governance() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    vault.set_global_params(default_global_config()).unwrap();
+
+    set_caller(accounts.bob);
+    assert_eq!(
+        vault.cancel_global_params_update(),
+        Err(Error::NotGovernance)
+    );
+}
+
+#[ink::test]
+fn cancel_global_params_update_works() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    vault.set_global_params(default_global_config()).unwrap();
+    vault.cancel_global_params_update().unwrap();
+
+    // Nothing pending anymore — execute fails even after the timelock.
+    set_time(24 * 60 * 60 * 1_000 + 1);
+    assert_eq!(
+        vault.execute_global_params_update(),
+        Err(Error::NoPendingContractParamsUpdate)
+    );
+}
+
+#[ink::test]
+fn cancel_global_params_update_without_pending_fails() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    assert_eq!(
+        vault.cancel_global_params_update(),
+        Err(Error::NoPendingContractParamsUpdate)
+    );
+}
+
+#[ink::test]
+fn set_global_params_rejects_fee_above_100_percent() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.transaction_fee = 10_001;
+    assert_eq!(vault.set_global_params(config), Err(Error::InvalidRatio));
+}
+
+#[ink::test]
+fn set_global_params_rejects_short_auction_duration() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.auction_duration_ms = 59_999;
+    assert_eq!(
+        vault.set_global_params(config),
+        Err(Error::InvalidAuctionDuration)
+    );
+}
+
+#[ink::test]
+fn set_global_params_rejects_long_auction_duration() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.auction_duration_ms = 7 * 24 * 60 * 60 * 1_000 + 1;
+    assert_eq!(
+        vault.set_global_params(config),
+        Err(Error::InvalidAuctionDuration)
+    );
+}
+
+#[ink::test]
+fn set_global_params_rejects_zero_oracle_age() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.max_oracle_age_ms = 0;
+    assert_eq!(
+        vault.set_global_params(config),
+        Err(Error::InvalidOracleMaxAge)
+    );
+}
+
+#[ink::test]
+fn transaction_fee_uses_global_params() {
+    let (mut vault, accounts) = setup();
+
+    // Default fee 30 bps: 0.3% of 1_000_000 = 3_000.
+    assert_eq!(vault.calculate_transaction_fee(1_000_000).unwrap(), 3_000);
+
+    // Raise the global fee to 100 bps (1%) through the timelocked path.
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.transaction_fee = 100;
+    vault.set_global_params(config).unwrap();
+    set_time(24 * 60 * 60 * 1_000 + 1);
+    vault.execute_global_params_update().unwrap();
+
+    assert_eq!(vault.calculate_transaction_fee(1_000_000).unwrap(), 10_000);
 }

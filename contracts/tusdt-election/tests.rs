@@ -17,9 +17,9 @@ type Env = tusdt_env::CustomEnvironment;
 
 const MS_PER_DAY: u64 = 86_400_000;
 /// Mirrors the election contract's `MIN_CANDIDATE_STAKE` const (the "owner" bar).
-const MIN_CANDIDATE_STAKE: u128 = 1_000_000_000_000;
+const MIN_CANDIDATE_STAKE: u128 = 10_000_000_000_000;
 /// A mocked stake comfortably above the registration floor.
-const STAKE_ABOVE: u64 = 2_000_000_000_000;
+const STAKE_ABOVE: u64 = 20_000_000_000_000;
 
 /// Builds a Unix-epoch timestamp (ms) for the `day`-th of the test election month. Tests drive a
 /// cycle in the first month on/after the genesis+term cadence anchor: with genesis 0 and a 730-day

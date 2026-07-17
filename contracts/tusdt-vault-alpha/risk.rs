@@ -67,8 +67,8 @@ impl TusdtVaultAlpha {
         Balance::try_from(min_bid).map_err(|_| Error::ArithmeticError)
     }
 
-    /// Validates a collateral addition against min, per-vault cap, and global cap using
-    /// the bounds configured for the specified netuid.
+    /// Validates a collateral addition and computes the projected per-vault and
+    /// per-netuid totals.
     pub(crate) fn ensure_collateral_bounds(
         &self,
         netuid: u16,
@@ -79,17 +79,9 @@ impl TusdtVaultAlpha {
             return Err(Error::InsufficientCollateral);
         }
 
-        let params = self.get_params(netuid);
-
         let projected_vault = vault_current
             .checked_add(addition)
             .ok_or(Error::ArithmeticError)?;
-        if projected_vault < params.min_vault_collateral {
-            return Err(Error::InsufficientCollateral);
-        }
-        if projected_vault > params.max_vault_collateral {
-            return Err(Error::CollateralCapExceeded);
-        }
 
         let netuid_total = self
             .netuid_total_collateral
@@ -98,9 +90,6 @@ impl TusdtVaultAlpha {
         let projected_total = netuid_total
             .checked_add(addition)
             .ok_or(Error::ArithmeticError)?;
-        if projected_total > params.max_total_collateral {
-            return Err(Error::CollateralCapExceeded);
-        }
 
         Ok((projected_vault, projected_total))
     }

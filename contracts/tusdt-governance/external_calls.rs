@@ -60,6 +60,34 @@ impl TusdtGovernance {
             .map_err(|_| Error::VaultCallFailed)
     }
 
+    pub(crate) fn forward_vault_set_approved_netuid(
+        &mut self,
+        netuid: u16,
+        approved: bool,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .set_approved_netuid(netuid, approved)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
+    pub(crate) fn forward_vault_set_global_params(
+        &mut self,
+        config: VaultGlobalParamsConfig,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .set_global_params(config)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
+    pub(crate) fn forward_vault_cancel_global_params_update(&mut self) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .cancel_global_params_update()
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
     // ----- Vault: council-gated (operational/emergency) -----
 
     pub(crate) fn forward_vault_pause(&mut self) -> Result<()> {

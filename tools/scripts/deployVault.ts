@@ -51,12 +51,18 @@ async function main(): Promise<void> {
         getOptionalEnv("VAULT_TREASURY_ADDRESS"),
       "VAULT_TREASURY_ADDRESS / --treasury-address",
     );
-    const netuid = Number(
+    const oracleNetuid = Number(
       requireValue(
-        getCliFlag("--netuid") ??
+        getCliFlag("--oracle-netuid") ??
+          getOptionalEnv("VAULT_ORACLE_NETUID") ??
+          getCliFlag("--netuid") ??
           getOptionalEnv("VAULT_NETUID"),
-        "VAULT_NETUID / --netuid",
+        "VAULT_ORACLE_NETUID / --oracle-netuid",
       ),
+    );
+    const hotkey = requireValue(
+      getCliFlag("--hotkey") ?? getOptionalEnv("VAULT_HOTKEY"),
+      "VAULT_HOTKEY / --hotkey (staking hotkey AccountId for alpha collateral)",
     );
 
     const contract = await deployVault(
@@ -66,7 +72,8 @@ async function main(): Promise<void> {
       tokenCodeHash,
       auctionCodeHash,
       oracleCodeHash,
-      netuid,
+      oracleNetuid,
+      hotkey,
     );
 
     console.log(
@@ -77,7 +84,8 @@ async function main(): Promise<void> {
         tokenCodeHash,
         auctionCodeHash,
         oracleCodeHash,
-        netuid,
+        oracleNetuid,
+        hotkey,
       }),
     );
   } finally {
