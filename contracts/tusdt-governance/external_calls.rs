@@ -116,6 +116,44 @@ impl TusdtGovernance {
         self.vault.pause().map_err(|_| Error::VaultCallFailed)
     }
 
+    // ----- Vault: upgrade/migration (maintainer-gated) -----
+
+    /// Transfers the ERC20 token controller from the current vault to a new account.
+    /// Maintainer-only. Delegates to `vault.set_token_controller(new_controller)`.
+    pub(crate) fn forward_vault_set_token_controller(
+        &mut self,
+        new_controller: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .set_token_controller(new_controller)
+            .map_err(|_| Error::VaultTokenCallFailed)
+    }
+
+    /// Updates the vault's stored auction contract address. Maintainer-only.
+    /// Delegates to `vault.update_auction_address(new_auction)`.
+    pub(crate) fn forward_vault_update_auction_address(
+        &mut self,
+        new_auction: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .update_auction_address(new_auction)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
+    /// Updates the vault's stored oracle contract address. Maintainer-only.
+    /// Delegates to `vault.update_oracle_address(new_oracle)`.
+    pub(crate) fn forward_vault_update_oracle_address(
+        &mut self,
+        new_oracle: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .update_oracle_address(new_oracle)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
     // ----- Oracle: maintainer-gated (config/risk) -----
 
     /// Sets/clears the oracle's round-committing validator.
