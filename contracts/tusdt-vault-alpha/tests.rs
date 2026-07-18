@@ -28,7 +28,21 @@ fn setup_with_approved_netuid(
     let mut vault = TusdtVaultAlpha::new_for_test(accounts.alice);
     set_caller(accounts.alice);
     vault.set_approved_netuid(1, true).unwrap();
+    // Disable vault creation fee for tests.
+    set_vault_creation_fee_to_zero(&mut vault);
     (vault, accounts)
+}
+
+fn set_vault_creation_fee_to_zero(vault: &mut TusdtVaultAlpha) {
+    let mut config = default_global_config();
+    config.vault_creation_fee = 0;
+    vault.set_global_params(config).unwrap();
+    // Advance past the 24h timelock, execute, then reset time to 0.
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
+        24 * 60 * 60 * 1_000 + 1,
+    );
+    vault.execute_global_params_update().unwrap();
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(0);
 }
 
 // ---------------------------------------------------------------------------
@@ -224,6 +238,7 @@ fn same_caller_can_open_vaults_on_different_netuids() {
     vault.set_approved_netuid(2, true).unwrap();
     register_mock(1_000);
     vault.create_alpha_vault(100, 1).unwrap();
+    register_mock(1_000);
     vault.create_alpha_vault(200, 2).unwrap();
     assert_eq!(vault.get_vaults_count(accounts.alice), 2);
 }
@@ -624,10 +639,10 @@ fn is_liquidatable_boundary() {
     stored.collateral_balance = 1_000;
     let price = Ratio::one();
 
-    stored.debt_balance = 834;
+    stored.borrowed_token_balance = 834;
     assert!(vault.is_liquidatable(price, &stored).unwrap());
 
-    stored.debt_balance = 833;
+    stored.borrowed_token_balance = 833;
     assert!(!vault.is_liquidatable(price, &stored).unwrap());
 }
 
@@ -647,6 +662,7 @@ fn default_global_config() -> VaultGlobalParamsConfig {
         transaction_fee: 30,
         auction_duration_ms: 3_600_000,
         max_oracle_age_ms: 1_800_000,
+        vault_creation_fee: 0,
     }
 }
 

@@ -35,12 +35,12 @@ impl TusdtVaultAlpha {
         vault_id: u32,
         vault: &Vault,
     ) -> Result<()> {
-        let previous_vault_debt = self
+        let previous_borrowed = self
             .vaults
             .get((owner, vault_id))
-            .map(|stored_vault: Vault| stored_vault.debt_balance)
+            .map(|stored_vault: Vault| stored_vault.borrowed_token_balance)
             .unwrap_or_default();
-        self.sync_owner_total_debt(owner, previous_vault_debt, vault.debt_balance)?;
+        self.sync_owner_total_debt(owner, previous_borrowed, vault.borrowed_token_balance)?;
         self.vaults.insert((owner, vault_id), vault);
         Ok(())
     }

@@ -744,6 +744,7 @@ fn vault_maintainer_forwarders_reject_non_maintainer() {
             transaction_fee: 30,
             auction_duration_ms: 3_600_000,
             max_oracle_age_ms: 1_800_000,
+            vault_creation_fee: 0,
         }),
         Err(Error::NotMaintainer)
     );

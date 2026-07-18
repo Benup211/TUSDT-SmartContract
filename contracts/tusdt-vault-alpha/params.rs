@@ -2,24 +2,23 @@ use super::*;
 
 const DEFAULT_COLLATERAL_RATIO_BASIS_POINTS: u32 = 15_000;
 const DEFAULT_LIQUIDATION_RATIO_BASIS_POINTS: u32 = 12_000;
-const DEFAULT_INTEREST_RATE_BASIS_POINTS: u32 = 1_000;
 const DEFAULT_LIQUIDATION_FEE_BASIS_POINTS: u32 = 1_100;
 const DEFAULT_TRANSACTION_FEE_BASIS_POINTS: u32 = 30;
 const DEFAULT_AUCTION_DURATION_MS: u64 = 3_600_000;
 const DEFAULT_MAX_ORACLE_AGE_MS: u64 = 1_800_000;
+const DEFAULT_VAULT_CREATION_FEE: Balance = 5_000_000;
 const MIN_AUCTION_DURATION_MS: u64 = 60_000;
 const MAX_AUCTION_DURATION_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
 
 impl TusdtVaultAlpha {
     /// Returns the default per-netuid vault parameters.
     ///
-    /// Defaults: collateral ratio 150%, liquidation ratio 120%, interest rate 10% APR,
+    /// Defaults: collateral ratio 150%, liquidation ratio 120%,
     /// liquidation fee 11%.
     pub(crate) fn default_contract_params() -> VaultContractParams {
         let params = VaultContractParams {
             collateral_ratio: Ratio::from_basis_points(DEFAULT_COLLATERAL_RATIO_BASIS_POINTS),
             liquidation_ratio: Ratio::from_basis_points(DEFAULT_LIQUIDATION_RATIO_BASIS_POINTS),
-            interest_rate: Ratio::from_basis_points(DEFAULT_INTEREST_RATE_BASIS_POINTS),
             liquidation_fee: Ratio::from_basis_points(DEFAULT_LIQUIDATION_FEE_BASIS_POINTS),
         };
         Self::validate_contract_params(&params)
@@ -35,7 +34,6 @@ impl TusdtVaultAlpha {
         let config = VaultContractParams {
             collateral_ratio: Ratio::from_basis_points(params.collateral_ratio),
             liquidation_ratio: Ratio::from_basis_points(params.liquidation_ratio),
-            interest_rate: Ratio::from_basis_points(params.interest_rate),
             liquidation_fee: Ratio::from_basis_points(params.liquidation_fee),
         };
         Self::validate_contract_params(&config)?;
@@ -56,10 +54,6 @@ impl TusdtVaultAlpha {
                 .liquidation_ratio
                 .to_basis_points()
                 .expect("stored liquidation ratio should fit in u32 basis points"),
-            interest_rate: params
-                .interest_rate
-                .to_basis_points()
-                .expect("stored interest rate should fit in u32 basis points"),
             liquidation_fee: params
                 .liquidation_fee
                 .to_basis_points()
@@ -71,7 +65,6 @@ impl TusdtVaultAlpha {
     ///
     /// - `collateral_ratio` must be >= 100% and strictly greater than `liquidation_ratio`
     /// - `liquidation_ratio` must be >= 100%
-    /// - `interest_rate` must be <= 100%
     /// - `liquidation_fee` must be <= 100%
     pub(crate) fn validate_contract_params(params: &VaultContractParams) -> Result<()> {
         let one = Ratio::one();
@@ -84,9 +77,6 @@ impl TusdtVaultAlpha {
         if params.collateral_ratio <= params.liquidation_ratio {
             return Err(Error::InvalidRatio);
         }
-        if params.interest_rate > one {
-            return Err(Error::InvalidRatio);
-        }
         if params.liquidation_fee > one {
             return Err(Error::InvalidRatio);
         }
@@ -96,12 +86,13 @@ impl TusdtVaultAlpha {
     /// Returns the default global (contract-wide) parameters.
     ///
     /// Defaults: transaction fee 0.3% (30 bps), auction duration 1 hour,
-    /// max oracle age 30 minutes.
+    /// max oracle age 30 minutes, vault creation fee 5,000,000 rao (0.005 TAO).
     pub(crate) fn default_global_params() -> VaultGlobalParams {
         let params = VaultGlobalParams {
             transaction_fee: Ratio::from_basis_points(DEFAULT_TRANSACTION_FEE_BASIS_POINTS),
             auction_duration_ms: DEFAULT_AUCTION_DURATION_MS,
             max_oracle_age_ms: DEFAULT_MAX_ORACLE_AGE_MS,
+            vault_creation_fee: DEFAULT_VAULT_CREATION_FEE,
         };
         Self::validate_global_params(&params)
             .expect("default vault global params should be valid");
@@ -117,6 +108,7 @@ impl TusdtVaultAlpha {
             transaction_fee: Ratio::from_basis_points(config.transaction_fee),
             auction_duration_ms: config.auction_duration_ms,
             max_oracle_age_ms: config.max_oracle_age_ms,
+            vault_creation_fee: config.vault_creation_fee,
         };
         Self::validate_global_params(&params)?;
         Ok(params)
@@ -132,6 +124,7 @@ impl TusdtVaultAlpha {
                 .expect("stored transaction fee should fit in u32 basis points"),
             auction_duration_ms: params.auction_duration_ms,
             max_oracle_age_ms: params.max_oracle_age_ms,
+            vault_creation_fee: params.vault_creation_fee,
         }
     }
 
@@ -140,6 +133,7 @@ impl TusdtVaultAlpha {
     /// - `transaction_fee` must not exceed 100%
     /// - `auction_duration_ms` must be within [60 seconds, 7 days]
     /// - `max_oracle_age_ms` must be non-zero
+    /// - `vault_creation_fee` may be zero (disables the fee for testing)
     pub(crate) fn validate_global_params(params: &VaultGlobalParams) -> Result<()> {
         if params.transaction_fee > Ratio::one() {
             return Err(Error::InvalidRatio);
