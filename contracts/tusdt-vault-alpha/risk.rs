@@ -45,7 +45,7 @@ impl TusdtVaultAlpha {
     /// Checks whether a vault's debt balance exceeds the liquidation limit.
     pub(crate) fn is_liquidatable(&self, price: Ratio, vault: &Vault) -> Result<bool> {
         let limit = self.liquidation_limit(vault.netuid, price, vault.collateral_balance)?;
-        Ok(vault.debt_balance > limit)
+        Ok(vault.borrowed_token_balance > limit)
     }
 
     /// Computes the minimum winning bid for a liquidation auction, using the fee rate

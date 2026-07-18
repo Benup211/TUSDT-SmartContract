@@ -22,9 +22,6 @@ mod vault {
     mod params {
         include!("params.rs");
     }
-    mod interest {
-        include!("interest.rs");
-    }
     mod risk {
         include!("risk.rs");
     }
@@ -32,7 +29,7 @@ mod vault {
         include!("vault_access.rs");
     }
 
-    /// A user's CDP record backed by subnet alpha: alpha stake held, principal borrowed, accrued debt, and timestamps.
+    /// A user's CDP record backed by subnet alpha: alpha stake held and principal borrowed.
     #[derive(Debug, Clone)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -43,10 +40,7 @@ mod vault {
         pub netuid: u16,
         pub collateral_balance: Balance,
         pub borrowed_token_balance: Balance,
-        pub debt_balance: Balance,
-        pub total_interest_accrued: Balance,
         pub created_at: u64,
-        pub last_interest_accrued_at: u64,
     }
 
     /// Internal representation of per-netuid risk parameters used by the vault.
@@ -56,7 +50,6 @@ mod vault {
     pub struct VaultContractParams {
         pub collateral_ratio: Ratio,
         pub liquidation_ratio: Ratio,
-        pub interest_rate: Ratio,
         pub liquidation_fee: Ratio,
     }
 
@@ -67,7 +60,6 @@ mod vault {
     pub struct VaultContractParamsConfig {
         pub collateral_ratio: u32,
         pub liquidation_ratio: u32,
-        pub interest_rate: u32,
         pub liquidation_fee: u32,
     }
 
@@ -88,6 +80,7 @@ mod vault {
         pub transaction_fee: Ratio,
         pub auction_duration_ms: u64,
         pub max_oracle_age_ms: u64,
+        pub vault_creation_fee: Balance,
     }
 
     #[derive(Debug, Copy, Clone)]
@@ -98,6 +91,7 @@ mod vault {
         pub transaction_fee: u32,
         pub auction_duration_ms: u64,
         pub max_oracle_age_ms: u64,
+        pub vault_creation_fee: Balance,
     }
 
     /// A queued global-parameter update awaiting timelock expiry.
@@ -189,7 +183,6 @@ mod vault {
         #[ink(topic)]
         vault_id: u32,
         amount: Balance,
-        transaction_fee: Balance,
     }
 
     /// Emitted when borrowed tUSDT is repaid.
@@ -200,19 +193,6 @@ mod vault {
         #[ink(topic)]
         vault_id: u32,
         amount: Balance,
-        transaction_fee: Balance,
-    }
-
-    /// Emitted when interest is accrued onto a vault's debt balance.
-    #[ink(event)]
-    pub struct InterestAccrued {
-        #[ink(topic)]
-        owner: AccountId,
-        #[ink(topic)]
-        vault_id: u32,
-        previous_debt_balance: Balance,
-        debt_balance: Balance,
-        accrued_at: u64,
     }
 
     /// Emitted when per-netuid contract parameters are updated after timelock expiry.
@@ -439,15 +419,11 @@ mod vault {
         UnapprovedNetuid,
         /// Cross-contract call to the ERC20 token contract failed.
         TokenContractCallFailed,
+        /// The caller did not transfer enough native TAO for the vault creation fee.
+        VaultCreationFeeNotMet,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
-
-    #[derive(Debug, PartialEq, Eq)]
-    pub(crate) struct DebtPaymentBreakdown {
-        pub principal_payment: Balance,
-        pub interest_payment: Balance,
-    }
 
     impl TusdtVaultAlpha {
         /// Initializes the alpha vault. `hotkey` is the single staking position for this
@@ -979,9 +955,12 @@ mod vault {
         /// atomically pulling `amount` of the CALLER's alpha stake (held under this
         /// vault's hotkey) into the contract's custody via the caller-forwarded
         /// `caller_transfer_stake` chain extension. No prior deposit intent or external
-        /// `transfer_stake` extrinsic is needed — the pull and the vault creation happen
-        /// in one message, so deposits are always attributed to the caller.
-        #[ink(message)]
+        /// `transfer_stake` extrinsic is needed.
+        ///
+        /// A vault creation fee (in native TAO) is charged to deter spam. The fee amount
+        /// is governed by [`VaultGlobalParams::vault_creation_fee`]. Any excess transferred
+        /// value is refunded to the caller.
+        #[ink(message, payable)]
         pub fn create_alpha_vault(&mut self, amount: Balance, netuid: u16) -> Result<u32> {
             self.ensure_not_paused()?;
             self.ensure_approved_netuid(netuid)?;
@@ -990,11 +969,14 @@ mod vault {
             }
 
             let caller = self.env().caller();
+            let transferred = self.env().transferred_value();
+            let vault_creation_fee = self.global_params.vault_creation_fee;
 
-            // Pull the caller's stake into the contract's coldkey. The destination is
-            // always this contract — never user-supplied. Fails cleanly (no state
-            // change) if the caller lacks stake under the vault hotkey, the subnet's
-            // TransferToggle is off, or the runtime lacks the caller-forwarded call.
+            if transferred < vault_creation_fee {
+                return Err(Error::VaultCreationFeeNotMet);
+            }
+
+            // Pull the caller's stake into the contract's coldkey.
             self.env()
                 .extension()
                 .caller_transfer_stake(
@@ -1021,10 +1003,7 @@ mod vault {
                 netuid,
                 collateral_balance: amount,
                 borrowed_token_balance: 0,
-                debt_balance: 0,
-                total_interest_accrued: 0,
                 created_at: timestamp,
-                last_interest_accrued_at: timestamp,
             };
 
             self.save_vault(caller, vault_id, &vault)?;
@@ -1034,6 +1013,22 @@ mod vault {
 
             let next_id = vault_id.checked_add(1).ok_or(Error::ArithmeticError)?;
             self.vault_count.insert(caller, &next_id);
+
+            // Transfer vault creation fee to treasury.
+            if vault_creation_fee > 0 {
+                self.env()
+                    .transfer(self.treasury, vault_creation_fee)
+                    .map_err(|_| Error::TransferFailed)?;
+            }
+            // Refund excess if caller sent more than the fee.
+            let excess = transferred
+                .checked_sub(vault_creation_fee)
+                .ok_or(Error::ArithmeticError)?;
+            if excess > 0 {
+                self.env()
+                    .transfer(caller, excess)
+                    .map_err(|_| Error::TransferFailed)?;
+            }
 
             self.env().emit_event(VaultCreated {
                 owner: caller,
@@ -1093,136 +1088,88 @@ mod vault {
             Ok(())
         }
 
-        /// Borrows TUSDT against the vault's alpha collateral. Deducts a transaction fee
-        /// (minted to the treasury) and mints the net amount to the caller. Validates that
-        /// the resulting debt does not exceed the maximum allowed by the collateral ratio.
+        /// Borrows TUSDT against the vault's alpha collateral. Mints the full
+        /// amount to the caller. Validates that the resulting borrowed balance
+        /// does not exceed the maximum allowed by the collateral ratio.
         #[ink(message)]
         pub fn borrow_token(&mut self, vault_id: u32, amount: Balance) -> Result<()> {
             self.ensure_not_paused()?;
 
             let (caller, mut vault) = self.load_caller_vault(vault_id)?;
 
-            self.accrue_interest_for_vault(&mut vault)?;
-
             if amount.eq(&0) {
                 self.save_vault(caller, vault_id, &vault)?;
                 return Ok(());
             }
-            let fee = self.calculate_transaction_fee(amount)?;
-            let net_borrow_amount = amount.checked_sub(fee).ok_or(Error::ArithmeticError)?;
 
             let price = self.current_collateral_price(vault.netuid)?;
 
-            let max_borrow = self.max_borrow_allowed(vault.netuid, price, vault.collateral_balance)?;
+            let max_borrow = self.max_borrow_allowed(
+                vault.netuid,
+                price,
+                vault.collateral_balance,
+            )?;
             let projected_borrowed = vault
                 .borrowed_token_balance
                 .checked_add(amount)
                 .ok_or(Error::ArithmeticError)?;
-            let projected_debt = vault
-                .debt_balance
-                .checked_add(amount)
-                .ok_or(Error::ArithmeticError)?;
-            if projected_debt > max_borrow {
+            if projected_borrowed > max_borrow {
                 return Err(Error::CollateralRatioExceeded);
             }
 
-            if net_borrow_amount > 0 {
+            if amount > 0 {
                 self.token
-                    .mint(caller, net_borrow_amount)
-                    .map_err(|_| Error::TransferFailed)?;
-            }
-            if fee > 0 {
-                self.token
-                    .mint(self.treasury, fee)
+                    .mint(caller, amount)
                     .map_err(|_| Error::TransferFailed)?;
             }
 
-            self.adjust_last_interest_accrued_at_for_new_borrow(&mut vault, amount)?;
             vault.borrowed_token_balance = projected_borrowed;
-            vault.debt_balance = projected_debt;
             self.save_vault(caller, vault_id, &vault)?;
 
             self.env().emit_event(TokensBorrowed {
                 owner: caller,
                 vault_id,
                 amount,
-                transaction_fee: fee,
             });
 
             Ok(())
         }
 
-        /// Repays borrowed TUSDT on an alpha vault. Burns the caller's tokens and routes
-        /// the interest portion and transaction fee to the treasury.
+        /// Repays borrowed TUSDT on an alpha vault. Burns the caller's tokens
+        /// and decrements the borrowed balance. No transaction fee is charged
+        /// on repayments.
         #[ink(message)]
         pub fn repay_token(&mut self, vault_id: u32, amount: Balance) -> Result<()> {
             self.ensure_not_paused()?;
 
             let (caller, mut vault) = self.load_caller_vault(vault_id)?;
 
-            self.accrue_interest_for_vault(&mut vault)?;
             if amount.eq(&0) {
                 self.save_vault(caller, vault_id, &vault)?;
                 return Ok(());
             }
-            if amount > vault.debt_balance {
+            if amount > vault.borrowed_token_balance {
                 return Err(Error::RepayAmountTooHigh);
             }
-            let fee = self.calculate_transaction_fee(amount)?;
-            let total_token_charge = amount.checked_add(fee).ok_or(Error::ArithmeticError)?;
-            self.ensure_token_balance_at_least(caller, total_token_charge)?;
-
-            let payment = Self::apply_debt_payment(&mut vault, amount)?;
+            self.ensure_token_balance_at_least(caller, amount)?;
 
             self.token
-                .burn(caller, total_token_charge)
+                .burn(caller, amount)
                 .map_err(|_| Error::TransferFailed)?;
-            let treasury_mint = payment
-                .interest_payment
-                .checked_add(fee)
-                .ok_or(Error::ArithmeticError)?;
-            if treasury_mint > 0 {
-                self.token
-                    .mint(self.treasury, treasury_mint)
-                    .map_err(|_| Error::TransferFailed)?;
-            }
 
+            vault.borrowed_token_balance = vault
+                .borrowed_token_balance
+                .checked_sub(amount)
+                .ok_or(Error::ArithmeticError)?;
             self.save_vault(caller, vault_id, &vault)?;
 
             self.env().emit_event(TokensRepaid {
                 owner: caller,
                 vault_id,
                 amount,
-                transaction_fee: fee,
             });
 
             Ok(())
-        }
-
-        /// Accrues any elapsed interest for a vault, returning the updated debt balance.
-        #[ink(message)]
-        pub fn accrue_interest(&mut self, owner: AccountId, vault_id: u32) -> Result<Balance> {
-            self.ensure_not_paused()?;
-
-            self.ensure_not_in_liquidation(owner, vault_id)?;
-
-            let mut vault = self.load_vault(owner, vault_id)?;
-            let previous_debt_balance = vault.debt_balance;
-
-            self.accrue_interest_for_vault(&mut vault)?;
-            let debt_balance = vault.debt_balance;
-            let accrued_at = vault.last_interest_accrued_at;
-
-            self.save_vault(owner, vault_id, &vault)?;
-            self.env().emit_event(InterestAccrued {
-                owner,
-                vault_id,
-                previous_debt_balance,
-                debt_balance,
-                accrued_at,
-            });
-
-            Ok(debt_balance)
         }
 
         /// Releases alpha collateral from a vault, returning the stake to a destination
@@ -1243,16 +1190,15 @@ mod vault {
                 return Err(Error::InsufficientCollateral);
             }
 
-            self.accrue_interest_for_vault(&mut vault)?;
             let projected_collateral = vault
                 .collateral_balance
                 .checked_sub(amount)
                 .ok_or(Error::ArithmeticError)?;
-            if vault.debt_balance > 0 {
+            if vault.borrowed_token_balance > 0 {
                 let price = self.current_collateral_price(vault.netuid)?;
                 let max_borrow_after_release =
                     self.max_borrow_allowed(vault.netuid, price, projected_collateral)?;
-                if vault.debt_balance > max_borrow_after_release {
+                if vault.borrowed_token_balance > max_borrow_after_release {
                     return Err(Error::CollateralRatioExceeded);
                 }
             }
@@ -1304,7 +1250,6 @@ mod vault {
             }
 
             let mut vault = self.load_vault(owner, vault_id)?;
-            self.accrue_interest_for_vault(&mut vault)?;
             let price = self.current_collateral_price(vault.netuid)?;
 
             if !self.is_liquidatable(price, &vault)? {
@@ -1352,14 +1297,14 @@ mod vault {
 
             // Now the TAO is in the contract's balance. Create a standard auction
             // with the actual TAO amount received.
-            let min_bid = self.liquidation_min_bid(vault.netuid, vault.debt_balance)?;
+            let min_bid = self.liquidation_min_bid(vault.netuid, vault.borrowed_token_balance)?;
             let auction_id = self
                 .auction
                 .create_auction(
                     owner,
                     vault_id,
                     tao_received,
-                    vault.debt_balance,
+                    vault.borrowed_token_balance,
                     min_bid,
                     price,
                     Some(self.global_params.auction_duration_ms),
@@ -1409,12 +1354,14 @@ mod vault {
             let collateral_sold = auction.collateral_balance;
             let transaction_fee = self.calculate_transaction_fee(collateral_sold)?;
             let debt_cleared = auction.debt_balance;
-            let payment = Self::apply_debt_payment(&mut vault, debt_cleared)?;
 
-            // ── Effects first (CEI): collateral was already zeroed and subtracted
-            //     from total_collateral_balance in trigger_liquidation_auction when
-            //     the alpha was unstaked.  Only vault debt state and the liquidation
-            //     marker need cleanup here.
+            // ── Effects first (CEI): collateral was already zeroed in
+            //     trigger_liquidation_auction. Only vault debt state and the
+            //     liquidation marker need cleanup here.
+            vault.borrowed_token_balance = vault
+                .borrowed_token_balance
+                .checked_sub(debt_cleared)
+                .ok_or(Error::ArithmeticError)?;
             self.save_vault(owner, vault_id, &vault)?;
             self.liquidation_auctions.remove((owner, vault_id));
 
@@ -1433,14 +1380,10 @@ mod vault {
             if winner_collateral > 0 && self.env().transfer(winner, winner_collateral).is_err() {
                 return Err(Error::TransferFailed);
             }
+            // Burn the full winning bid (all principal — no interest split).
             self.token
-                .burn(self.env().account_id(), payment.principal_payment)
+                .burn(self.env().account_id(), debt_cleared)
                 .map_err(|_| Error::TransferFailed)?;
-            if payment.interest_payment > 0 {
-                self.token
-                    .transfer(self.treasury, payment.interest_payment)
-                    .map_err(|_| Error::TransferFailed)?;
-            }
 
             self.env().emit_event(VaultLiquidated {
                 owner,
@@ -1742,46 +1685,9 @@ mod vault {
         }
 
         /// Applies a repayment amount to a vault's debt, splitting it into principal
-        /// and interest portions. Interest is always paid before principal.
-        pub(crate) fn apply_debt_payment(
-            vault: &mut Vault,
-            payment_amount: Balance,
-        ) -> Result<DebtPaymentBreakdown> {
-            if payment_amount > vault.debt_balance {
-                return Err(Error::RepayAmountTooHigh);
-            }
-
-            let outstanding_interest = Self::outstanding_interest(vault)?;
-            let interest_payment = core::cmp::min(payment_amount, outstanding_interest);
-            let principal_payment = payment_amount
-                .checked_sub(interest_payment)
-                .ok_or(Error::ArithmeticError)?;
-
-            vault.debt_balance = vault
-                .debt_balance
-                .checked_sub(payment_amount)
-                .ok_or(Error::ArithmeticError)?;
-            vault.borrowed_token_balance = vault
-                .borrowed_token_balance
-                .checked_sub(principal_payment)
-                .ok_or(Error::ArithmeticError)?;
-
-            Ok(DebtPaymentBreakdown {
-                principal_payment,
-                interest_payment,
-            })
-        }
-
-        /// Returns the accrued (unpaid) interest on a vault: `debt - principal`.
-        pub(crate) fn outstanding_interest(vault: &Vault) -> Result<Balance> {
-            vault
-                .debt_balance
-                .checked_sub(vault.borrowed_token_balance)
-                .ok_or(Error::ArithmeticError)
-        }
-
         /// Calculates the transaction fee on a given amount using the global
         /// `transaction_fee` ratio (Balance = u64, fee in rao units).
+        /// Only used during auction settlement.
         pub(crate) fn calculate_transaction_fee(&self, amount: Balance) -> Result<Balance> {
             self.global_params
                 .transaction_fee
