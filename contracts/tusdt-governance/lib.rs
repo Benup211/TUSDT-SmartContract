@@ -244,6 +244,42 @@ mod governance {
         snapshot_block: u32,
     }
 
+    /// Emitted when the stored vault contract address is updated by the maintainer.
+    #[ink(event)]
+    pub struct VaultAddressUpdated {
+        #[ink(topic)]
+        old_vault: AccountId,
+        #[ink(topic)]
+        new_vault: AccountId,
+    }
+
+    /// Emitted when the stored auction contract address is updated by the maintainer.
+    #[ink(event)]
+    pub struct GovernanceAuctionUpdated {
+        #[ink(topic)]
+        old_auction: AccountId,
+        #[ink(topic)]
+        new_auction: AccountId,
+    }
+
+    /// Emitted when the stored oracle contract address is updated by the maintainer.
+    #[ink(event)]
+    pub struct GovernanceOracleUpdated {
+        #[ink(topic)]
+        old_oracle: AccountId,
+        #[ink(topic)]
+        new_oracle: AccountId,
+    }
+
+    /// Emitted when the stored treasury contract address is updated by the maintainer.
+    #[ink(event)]
+    pub struct GovernanceTreasuryUpdated {
+        #[ink(topic)]
+        old_treasury: AccountId,
+        #[ink(topic)]
+        new_treasury: AccountId,
+    }
+
     /// Errors returned by the governance contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
@@ -272,6 +308,8 @@ mod governance {
         VaultCallFailed,
         AuctionCallFailed,
         OracleCallFailed,
+        /// Cross-contract call to the vault's token-controller transfer failed.
+        VaultTokenCallFailed,
         ArithmeticError,
     }
 
@@ -385,6 +423,24 @@ mod governance {
             self.treasury.to_account_id()
         }
 
+        /// Returns the vault contract address.
+        #[ink(message)]
+        pub fn vault_address(&self) -> AccountId {
+            self.vault.to_account_id()
+        }
+
+        /// Returns the auction contract address.
+        #[ink(message)]
+        pub fn auction_address(&self) -> AccountId {
+            self.auction.to_account_id()
+        }
+
+        /// Returns the oracle contract address.
+        #[ink(message)]
+        pub fn oracle_address(&self) -> AccountId {
+            self.oracle.to_account_id()
+        }
+
         /// Installs `new_maintainer` as the maintainer; callable only by the election contract.
         /// The explicit selector is matched by the election's raw cross-contract call.
         #[ink(message, selector = 0xE1EC7000)]
@@ -406,6 +462,59 @@ mod governance {
         pub fn election_set_netuid(&mut self, netuid: u16) -> Result<()> {
             self.ensure_election()?;
             self.netuid = netuid;
+            Ok(())
+        }
+
+        /// Updates the stored vault contract address. Maintainer-only.
+        /// Used after a vault upgrade to point governance at the new vault.
+        #[ink(message)]
+        pub fn update_vault_address(&mut self, new_vault: AccountId) -> Result<()> {
+            self.ensure_maintainer()?;
+            let old_vault = self.vault.to_account_id();
+            self.vault = TusdtVaultAlphaRef::from_account_id(new_vault);
+            self.env().emit_event(VaultAddressUpdated {
+                old_vault,
+                new_vault,
+            });
+            Ok(())
+        }
+
+        /// Updates the stored auction contract address. Maintainer-only.
+        #[ink(message)]
+        pub fn update_auction_address(&mut self, new_auction: AccountId) -> Result<()> {
+            self.ensure_maintainer()?;
+            let old_auction = self.auction.to_account_id();
+            self.auction = TusdtAuctionRef::from_account_id(new_auction);
+            self.env().emit_event(GovernanceAuctionUpdated {
+                old_auction,
+                new_auction,
+            });
+            Ok(())
+        }
+
+        /// Updates the stored oracle contract address. Maintainer-only.
+        #[ink(message)]
+        pub fn update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
+            self.ensure_maintainer()?;
+            let old_oracle = self.oracle.to_account_id();
+            self.oracle = TusdtOracleRef::from_account_id(new_oracle);
+            self.env().emit_event(GovernanceOracleUpdated {
+                old_oracle,
+                new_oracle,
+            });
+            Ok(())
+        }
+
+        /// Updates the stored treasury contract address. Maintainer-only.
+        #[ink(message)]
+        pub fn update_treasury_address(&mut self, new_treasury: AccountId) -> Result<()> {
+            self.ensure_maintainer()?;
+            let old_treasury = self.treasury.to_account_id();
+            self.treasury = TusdtTreasuryRef::from_account_id(new_treasury);
+            self.env().emit_event(GovernanceTreasuryUpdated {
+                old_treasury,
+                new_treasury,
+            });
             Ok(())
         }
 
@@ -466,6 +575,24 @@ mod governance {
         #[ink(message)]
         pub fn vault_update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.forward_vault_update_platform(new_platform)
+        }
+
+        /// Transfers the ERC20 token controller via the vault; maintainer-only.
+        #[ink(message)]
+        pub fn vault_set_token_controller(&mut self, new_controller: AccountId) -> Result<()> {
+            self.forward_vault_set_token_controller(new_controller)
+        }
+
+        /// Updates the vault's auction contract address via governance; maintainer-only.
+        #[ink(message)]
+        pub fn vault_update_auction_address(&mut self, new_auction: AccountId) -> Result<()> {
+            self.forward_vault_update_auction_address(new_auction)
+        }
+
+        /// Updates the vault's oracle contract address via governance; maintainer-only.
+        #[ink(message)]
+        pub fn vault_update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
+            self.forward_vault_update_oracle_address(new_oracle)
         }
 
         /// Unpauses the vault; maintainer-only (deliberate recovery).

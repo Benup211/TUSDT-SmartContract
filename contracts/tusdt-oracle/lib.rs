@@ -138,6 +138,15 @@ mod oracle {
         min_submitter_stake: u128,
     }
 
+    /// Emitted when the controller (vault) address is updated by governance.
+    #[ink(event)]
+    pub struct OracleControllerUpdated {
+        #[ink(topic)]
+        old_controller: AccountId,
+        #[ink(topic)]
+        new_controller: AccountId,
+    }
+
     /// Errors returned by the oracle contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
@@ -365,6 +374,21 @@ mod oracle {
             self.env().emit_event(OracleGovernanceUpdated {
                 previous_governance,
                 new_governance,
+            });
+            Ok(())
+        }
+
+        /// Transfers the controller (vault) role to a new account. Governance-only.
+        /// Used during vault upgrades to hand off control of this oracle to a new
+        /// vault instance.
+        #[ink(message)]
+        pub fn set_controller(&mut self, new_controller: AccountId) -> Result<()> {
+            self.ensure_governance()?;
+            let old_controller = self.controller;
+            self.controller = new_controller;
+            self.env().emit_event(OracleControllerUpdated {
+                old_controller,
+                new_controller,
             });
             Ok(())
         }

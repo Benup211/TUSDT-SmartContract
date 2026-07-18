@@ -9,7 +9,7 @@ mod vault {
     use core::cmp::min;
     use ink::prelude::vec::Vec;
     use ink::storage::{Mapping, StorageVec};
-    use ink::ToAccountId;
+    use ink::{env::call::FromAccountId, ToAccountId};
 
     use tusdt_auction::TusdtAuctionRef;
     use tusdt_erc20::TusdtErc20Ref;
@@ -280,6 +280,40 @@ mod vault {
         new_platform: AccountId,
     }
 
+    /// Emitted when governance transfers the ERC20 token controller to a new account.
+    #[ink(event)]
+    pub struct TokenControllerUpdated {
+        #[ink(topic)]
+        new_controller: AccountId,
+    }
+
+    /// Emitted when the stored auction contract address is updated by governance.
+    #[ink(event)]
+    pub struct AuctionAddressUpdated {
+        #[ink(topic)]
+        old_auction: AccountId,
+        #[ink(topic)]
+        new_auction: AccountId,
+    }
+
+    /// Emitted when the stored oracle contract address is updated by governance.
+    #[ink(event)]
+    pub struct OracleAddressUpdated {
+        #[ink(topic)]
+        old_oracle: AccountId,
+        #[ink(topic)]
+        new_oracle: AccountId,
+    }
+
+    /// Emitted when the stored token contract address is updated by governance.
+    #[ink(event)]
+    pub struct TokenAddressUpdated {
+        #[ink(topic)]
+        old_token: AccountId,
+        #[ink(topic)]
+        new_token: AccountId,
+    }
+
     /// Emitted when the contract is paused.
     #[ink(event)]
     pub struct Paused {}
@@ -403,6 +437,8 @@ mod vault {
         StakeTransferFailed,
         /// The specified netuid is not in the approved set.
         UnapprovedNetuid,
+        /// Cross-contract call to the ERC20 token contract failed.
+        TokenContractCallFailed,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -445,6 +481,112 @@ mod vault {
                 .endowment(0)
                 .salt_bytes([2; 32])
                 .instantiate();
+
+            Self {
+                governance,
+                treasury,
+                platform: governance,
+                paused: false,
+                token,
+                auction,
+                oracle,
+                total_collateral_balance: 0,
+                vault_hotkey: hotkey,
+                approved_netuids: Mapping::default(),
+                netuid_total_collateral: Mapping::default(),
+                netuid_params: Mapping::default(),
+                pending_contract_params_updates: Mapping::default(),
+                global_params: Self::default_global_params(),
+                pending_global_params_update: None,
+                vaults: Mapping::default(),
+                owner_total_debt: Mapping::default(),
+                vault_count: Mapping::default(),
+                vault_keys: StorageVec::default(),
+                liquidation_auctions: Mapping::default(),
+            }
+        }
+
+        /// Initializes an alpha vault reusing an already-deployed TUSDT token contract.
+        /// Unlike [`new`], this does NOT spawn a new ERC20 — it takes `token_address`
+        /// as an existing contract. The deployer becomes the initial governance.
+        /// New auction and oracle child contracts are still spawned.
+        ///
+        /// Use this constructor when upgrading: the existing ERC20 (with balances,
+        /// allowances, supply, and minter set) is preserved across the upgrade, and a
+        /// new vault instance takes over control after governance transfers the token
+        /// controller via [`set_token_controller`].
+        #[ink(constructor)]
+        pub fn new_upgrade(
+            treasury: AccountId,
+            token_address: AccountId,
+            auction_code_hash: Hash,
+            oracle_code_hash: Hash,
+            oracle_netuid: u16,
+            hotkey: AccountId,
+        ) -> Self {
+            let governance = Self::env().caller();
+            let contract_account = Self::env().account_id();
+
+            let token = TusdtErc20Ref::from_account_id(token_address);
+            let auction = TusdtAuctionRef::new(contract_account, governance, token_address)
+                .code_hash(auction_code_hash)
+                .endowment(0)
+                .salt_bytes([1; 32])
+                .instantiate();
+            let oracle = TusdtOracleRef::new(contract_account, governance, oracle_netuid)
+                .code_hash(oracle_code_hash)
+                .endowment(0)
+                .salt_bytes([2; 32])
+                .instantiate();
+
+            Self {
+                governance,
+                treasury,
+                platform: governance,
+                paused: false,
+                token,
+                auction,
+                oracle,
+                total_collateral_balance: 0,
+                vault_hotkey: hotkey,
+                approved_netuids: Mapping::default(),
+                netuid_total_collateral: Mapping::default(),
+                netuid_params: Mapping::default(),
+                pending_contract_params_updates: Mapping::default(),
+                global_params: Self::default_global_params(),
+                pending_global_params_update: None,
+                vaults: Mapping::default(),
+                owner_total_debt: Mapping::default(),
+                vault_count: Mapping::default(),
+                vault_keys: StorageVec::default(),
+                liquidation_auctions: Mapping::default(),
+            }
+        }
+
+        /// Initializes an alpha vault reusing already-deployed token, auction, and oracle
+        /// contracts. Unlike [`new`], this does NOT spawn any child contracts — it takes
+        /// existing addresses for all three. The deployer becomes the initial governance.
+        ///
+        /// Use this constructor for a full state-preserving upgrade where the auction and
+        /// oracle are retained alongside the token. Before calling
+        /// [`update_governance`] on the new vault, governance MUST call
+        /// `set_controller` on the existing auction and oracle contracts to transfer
+        /// their controller role to this vault, otherwise [`update_governance`]'s
+        /// `sync_child_governance` will fail (auction/oracle `update_governance` is
+        /// controller-gated).
+        #[ink(constructor)]
+        pub fn new_upgrade_preserve_all(
+            treasury: AccountId,
+            token_address: AccountId,
+            auction_address: AccountId,
+            oracle_address: AccountId,
+            hotkey: AccountId,
+        ) -> Self {
+            let governance = Self::env().caller();
+
+            let token = TusdtErc20Ref::from_account_id(token_address);
+            let auction = TusdtAuctionRef::from_account_id(auction_address);
+            let oracle = TusdtOracleRef::from_account_id(oracle_address);
 
             Self {
                 governance,
@@ -654,6 +796,63 @@ mod vault {
                 new_platform,
             });
 
+            Ok(())
+        }
+
+        /// Transfers the ERC20 token controller role to a new account. Governance only.
+        /// Needed during upgrades to hand token control from the old vault to a newly
+        /// deployed vault. Calls through to the ERC20 contract's `set_controller`,
+        /// which also handles minter-set migration.
+        #[ink(message)]
+        pub fn set_token_controller(&mut self, new_controller: AccountId) -> Result<()> {
+            self.ensure_governance()?;
+            self.token
+                .set_controller(new_controller)
+                .map_err(|_| Error::TokenContractCallFailed)?;
+            self.env().emit_event(TokenControllerUpdated { new_controller });
+            Ok(())
+        }
+
+        /// Updates the stored auction contract address. Governance only.
+        /// Used when the auction is redeployed or replaced during an upgrade.
+        #[ink(message)]
+        pub fn update_auction_address(&mut self, new_auction: AccountId) -> Result<()> {
+            self.ensure_governance()?;
+            let old_auction = self.auction.to_account_id();
+            self.auction = TusdtAuctionRef::from_account_id(new_auction);
+            self.env().emit_event(AuctionAddressUpdated {
+                old_auction,
+                new_auction,
+            });
+            Ok(())
+        }
+
+        /// Updates the stored oracle contract address. Governance only.
+        /// Used when the oracle is redeployed or replaced during an upgrade.
+        #[ink(message)]
+        pub fn update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
+            self.ensure_governance()?;
+            let old_oracle = self.oracle.to_account_id();
+            self.oracle = TusdtOracleRef::from_account_id(new_oracle);
+            self.env().emit_event(OracleAddressUpdated {
+                old_oracle,
+                new_oracle,
+            });
+            Ok(())
+        }
+
+        /// Updates the stored token (ERC20) contract address. Governance only.
+        /// Used when the token contract is redeployed and the vault needs to
+        /// reference the new instance.
+        #[ink(message)]
+        pub fn update_token_address(&mut self, new_token: AccountId) -> Result<()> {
+            self.ensure_governance()?;
+            let old_token = self.token.to_account_id();
+            self.token = TusdtErc20Ref::from_account_id(new_token);
+            self.env().emit_event(TokenAddressUpdated {
+                old_token,
+                new_token,
+            });
             Ok(())
         }
 
