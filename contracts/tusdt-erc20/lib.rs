@@ -39,6 +39,7 @@ mod tusdt {
     /// Errors returned by the tUSDT token contract.
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
+    #[allow(clippy::enum_variant_names)]
     pub enum Error {
         /// Sender's balance is below the requested amount.
         InsufficientBalance,

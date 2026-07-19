@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![allow(clippy::enum_variant_names)]
 
 pub use self::vault::{
     TusdtVaultAlpha, TusdtVaultAlphaRef, VaultContractParamsConfig, VaultGlobalParamsConfig,
@@ -142,6 +143,12 @@ mod vault {
         vault_count: Mapping<AccountId, u32>,
         vault_keys: StorageVec<(AccountId, u32)>,
         liquidation_auctions: Mapping<(AccountId, u32), u32>,
+
+        /// Number of vaults currently in active liquidation auctions.
+        /// Used as a fast guard — operations that conflict with liquidation
+        /// (claim_excess_alpha, set_vault_hotkey, transfer_native_to_treasury)
+        /// are blocked while this is non-zero.
+        active_liquidation_count: u32,
     }
 
     /// Emitted when a new alpha-backed vault is opened.
@@ -319,6 +326,22 @@ mod vault {
         tao_received: Balance,
     }
 
+    /// Emitted when the vault's staking hotkey is changed by governance.
+    #[ink(event)]
+    pub struct VaultHotkeyChanged {
+        #[ink(topic)]
+        old_hotkey: AccountId,
+        #[ink(topic)]
+        new_hotkey: AccountId,
+    }
+
+    /// Emitted when governance transfers native TAO from the vault to the treasury.
+    #[ink(event)]
+    pub struct NativeTransferredToTreasury {
+        #[ink(topic)]
+        amount: Balance,
+    }
+
     /// Emitted when a liquidation auction is created for an underwater vault.
     #[ink(event)]
     pub struct LiquidationAuctionCreated {
@@ -421,9 +444,16 @@ mod vault {
         TokenContractCallFailed,
         /// The caller did not transfer enough native TAO for the vault creation fee.
         VaultCreationFeeNotMet,
+        /// Operation blocked because one or more vaults are in active liquidation auctions.
+        ActiveLiquidationsExist,
+        /// Too many netuids passed to `set_vault_hotkey` (max 32).
+        TooManyNetuids,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
+
+    /// Maximum number of netuids that can be passed to `set_vault_hotkey` in one call.
+    const MAX_NETUIDS_PER_SET_HOTKEY: usize = 32;
 
     impl TusdtVaultAlpha {
         /// Initializes the alpha vault. `hotkey` is the single staking position for this
@@ -479,6 +509,7 @@ mod vault {
                 vault_count: Mapping::default(),
                 vault_keys: StorageVec::default(),
                 liquidation_auctions: Mapping::default(),
+                active_liquidation_count: 0,
             }
         }
 
@@ -536,6 +567,7 @@ mod vault {
                 vault_count: Mapping::default(),
                 vault_keys: StorageVec::default(),
                 liquidation_auctions: Mapping::default(),
+                active_liquidation_count: 0,
             }
         }
 
@@ -585,6 +617,7 @@ mod vault {
                 vault_count: Mapping::default(),
                 vault_keys: StorageVec::default(),
                 liquidation_auctions: Mapping::default(),
+                active_liquidation_count: 0,
             }
         }
 
@@ -901,6 +934,12 @@ mod vault {
         pub fn claim_excess_alpha(&mut self, netuid: u16) -> Result<()> {
             self.ensure_governance()?;
 
+            // Block claiming excess while any liquidation auction is in progress —
+            // the unstaked alpha from the liquidated vault has not yet been settled.
+            if self.active_liquidation_count > 0 {
+                return Err(Error::ActiveLiquidationsExist);
+            }
+
             // Read actual available stake.  If none exists on this netuid, nothing to claim.
             let current_stake = match self.get_contract_stake(netuid) {
                 Ok(s) => s,
@@ -944,6 +983,83 @@ mod vault {
                 netuid,
                 excess_alpha: excess,
                 tao_received,
+            });
+
+            Ok(())
+        }
+
+        /// Moves all alpha stake from the current vault hotkey to `new_hotkey` across
+        /// the specified netuids, then updates the stored hotkey. Governance only.
+        /// Reverts if any liquidation auction is active.
+        ///
+        /// Uses chain extension `move_stake` (func 5) which transfers the staking
+        /// position from one hotkey to another on the same netuid. The contract
+        /// remains the coldkey throughout — only the hotkey identity changes.
+        ///
+        /// Netuids with no stake are silently skipped. The hotkey is only updated
+        /// after all moves succeed (the extrinsic is atomic — partial success rolls back).
+        #[ink(message)]
+        pub fn set_vault_hotkey(
+            &mut self,
+            new_hotkey: AccountId,
+            netuids: Vec<u16>,
+        ) -> Result<()> {
+            self.ensure_governance()?;
+            self.ensure_no_active_liquidations()?;
+
+            if netuids.len() > MAX_NETUIDS_PER_SET_HOTKEY {
+                return Err(Error::TooManyNetuids);
+            }
+
+            let old_hotkey = self.vault_hotkey;
+
+            for netuid in netuids {
+                let stake = match self.get_contract_stake(netuid) {
+                    Ok(s) => s,
+                    Err(Error::NoAlphaStakeFound) => continue,
+                    Err(e) => return Err(e),
+                };
+                if stake > 0 {
+                    self.env()
+                        .extension()
+                        .move_stake(old_hotkey, new_hotkey, netuid, netuid, stake)
+                        .map_err(|_| Error::ChainExtensionFailed)?;
+                }
+            }
+
+            self.vault_hotkey = new_hotkey;
+
+            self.env().emit_event(VaultHotkeyChanged {
+                old_hotkey,
+                new_hotkey,
+            });
+
+            Ok(())
+        }
+
+        /// Transfers the vault contract's entire native TAO balance to the treasury.
+        /// Governance only. Reverts if any liquidation auction is active (native TAO
+        /// from liquidation must remain in the contract until settlement).
+        ///
+        /// This is a general-purpose sweep for TAO that accumulates in the contract
+        /// outside the normal liquidation/claim-excess flows (e.g., dust, overpayments).
+        #[ink(message)]
+        pub fn transfer_native_to_treasury(&mut self) -> Result<()> {
+            self.ensure_governance()?;
+            self.ensure_no_active_liquidations()?;
+
+            let balance = self.env().balance();
+            // Keep 1 unit of native balance as existential deposit guard so the
+            // contract account is never reaped.
+            let transfer_amount = balance.saturating_sub(1);
+            if transfer_amount > 0 {
+                self.env()
+                    .transfer(self.treasury, transfer_amount)
+                    .map_err(|_| Error::TransferFailed)?;
+            }
+
+            self.env().emit_event(NativeTransferredToTreasury {
+                amount: transfer_amount,
             });
 
             Ok(())
@@ -1314,6 +1430,12 @@ mod vault {
             self.liquidation_auctions
                 .insert((owner, vault_id), &auction_id);
 
+            // Increment the active liquidation counter.
+            self.active_liquidation_count = self
+                .active_liquidation_count
+                .checked_add(1)
+                .ok_or(Error::ArithmeticError)?;
+
             self.env().emit_event(LiquidationAuctionCreated {
                 owner,
                 vault_id,
@@ -1347,7 +1469,7 @@ mod vault {
 
             let winner = auction
                 .highest_bidder
-                .expect("checked winner presence above");
+                .ok_or(Error::AuctionNotFinalized)?;
             let winning_bid = auction.highest_bid;
 
             let mut vault = self.load_vault(owner, vault_id)?;
@@ -1384,6 +1506,14 @@ mod vault {
             self.token
                 .burn(self.env().account_id(), debt_cleared)
                 .map_err(|_| Error::TransferFailed)?;
+
+            // ── Effects: decrement counter only after all external calls succeed.
+            //     This ensures the liquidation gate is not released prematurely
+            //     if any interaction fails.
+            self.active_liquidation_count = self
+                .active_liquidation_count
+                .checked_sub(1)
+                .ok_or(Error::ArithmeticError)?;
 
             self.env().emit_event(VaultLiquidated {
                 owner,
@@ -1429,6 +1559,19 @@ mod vault {
         #[ink(message)]
         pub fn governance(&self) -> AccountId {
             self.governance
+        }
+
+        /// Returns the vault's staking hotkey — the single hotkey under which all
+        /// subnet alpha collateral is staked for this vault instance.
+        #[ink(message)]
+        pub fn get_vault_hotkey(&self) -> AccountId {
+            self.vault_hotkey
+        }
+
+        /// Returns the number of vaults currently in active liquidation auctions.
+        #[ink(message)]
+        pub fn get_active_liquidation_count(&self) -> u32 {
+            self.active_liquidation_count
         }
 
         /// Returns the current treasury address.
@@ -1768,6 +1911,16 @@ mod vault {
             Ok(())
         }
 
+        /// Ensures no liquidation auctions are currently active.
+        /// Used by governance operations (`claim_excess_alpha`, `set_vault_hotkey`,
+        /// `transfer_native_to_treasury`) that must not run concurrently with liquidations.
+        fn ensure_no_active_liquidations(&self) -> Result<()> {
+            if self.active_liquidation_count > 0 {
+                return Err(Error::ActiveLiquidationsExist);
+            }
+            Ok(())
+        }
+
         /// Propagates governance change to child auction and oracle contracts.
         /// No-op in test builds where child contracts are not real instances.
         #[cfg(not(test))]
@@ -1815,6 +1968,7 @@ mod vault {
                 vault_count: Mapping::default(),
                 vault_keys: StorageVec::default(),
                 liquidation_auctions: Mapping::default(),
+                active_liquidation_count: 0,
             }
         }
 
@@ -1826,6 +1980,12 @@ mod vault {
         ) {
             self.liquidation_auctions
                 .insert((owner, vault_id), &auction_id);
+        }
+
+        /// Set the active liquidation counter directly (bypasses the normal
+        /// trigger/settle flow) for testing liquidation-gated operations.
+        pub(crate) fn set_active_liquidation_count_for_test(&mut self, count: u32) {
+            self.active_liquidation_count = count;
         }
     }
 }

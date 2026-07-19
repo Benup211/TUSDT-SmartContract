@@ -74,7 +74,7 @@ fn create_auction_works() {
     assert_eq!(created.ends_at, 1_010);
     assert_eq!(created.highest_bid, 0);
     assert_eq!(created.highest_bidder, None);
-    assert_eq!(created.is_finalized, false);
+    assert!(!created.is_finalized);
 }
 
 #[ink::test]
@@ -207,7 +207,7 @@ fn finalize_auction_fails_without_bids_after_end() {
     let pending = auction
         .get_auction(auction_id)
         .expect("auction should exist");
-    assert_eq!(pending.is_finalized, false);
+    assert!(!pending.is_finalized);
     assert_eq!(auction.get_active_auctions_count(), 1);
     assert_eq!(
         auction.get_active_vault_auction(accounts.bob, 3),
