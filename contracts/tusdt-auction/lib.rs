@@ -1,4 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::too_many_arguments)]
 
 pub use self::auction::{Auction, Bid, BidMetadata, TusdtAuction, TusdtAuctionRef};
 

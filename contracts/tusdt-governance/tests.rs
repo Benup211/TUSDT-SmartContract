@@ -5,7 +5,8 @@
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
-    clippy::redundant_pattern_matching
+    clippy::redundant_pattern_matching,
+    unused_variables
 )]
 
 use super::governance::*;

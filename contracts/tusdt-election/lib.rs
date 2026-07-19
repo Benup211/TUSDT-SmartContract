@@ -1,4 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![allow(clippy::type_complexity)]
 
 //! A 2-year maintainer election contract with Merkle-snapshot approval voting and cross-subnet
 //! transition support. Runs a quadrennial election cycle for the protocol's maintainer authority,

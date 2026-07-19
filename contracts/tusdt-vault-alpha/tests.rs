@@ -99,8 +99,8 @@ impl test::ChainExtension for MockExtension {
                 ink::scale::Encode::encode_to(&availability, output);
                 0
             }
-            // Write ops (2 = remove_stake, 6 = transfer_stake) — no-op success
-            2 | 6 => 0,
+            // Write ops (2 = remove_stake, 5 = move_stake, 6 = transfer_stake) — no-op success
+            2 | 5 | 6 => 0,
             // 25 = caller_transfer_stake (caller-forwarded pull) — honours transfer_fails
             25 => {
                 if self.transfer_fails {
@@ -829,3 +829,137 @@ fn transaction_fee_uses_global_params() {
 
     assert_eq!(vault.calculate_transaction_fee(1_000_000).unwrap(), 10_000);
 }
+
+// ── Hotkey getter ────────────────────────────────────────────────
+
+#[ink::test]
+fn get_vault_hotkey_returns_constructor_value() {
+    let (vault, accounts) = setup();
+    // new_for_test sets vault_hotkey to accounts.bob
+    assert_eq!(vault.get_vault_hotkey(), accounts.bob);
+}
+
+// ── Active liquidation counter ───────────────────────────────────
+
+#[ink::test]
+fn active_liquidation_count_starts_at_zero() {
+    let (vault, _accounts) = setup();
+    assert_eq!(vault.get_active_liquidation_count(), 0);
+}
+
+// ── Change hotkey ────────────────────────────────────────────────
+
+#[ink::test]
+fn set_hotkey_rejects_non_governance() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.bob); // bob is NOT governance (alice is)
+    let result = vault.set_vault_hotkey(accounts.charlie, vec![1]);
+    assert_eq!(result, Err(Error::NotGovernance));
+}
+
+#[ink::test]
+fn set_hotkey_blocked_during_liquidation() {
+    let (mut vault, accounts) = setup();
+    // Simulate an active liquidation by setting the counter directly.
+    set_caller(accounts.alice);
+    vault.set_active_liquidation_count_for_test(1);
+    let result = vault.set_vault_hotkey(accounts.charlie, vec![1]);
+    assert_eq!(result, Err(Error::ActiveLiquidationsExist));
+}
+
+#[ink::test]
+fn set_hotkey_empty_netuids_is_noop() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    vault.set_vault_hotkey(accounts.charlie, vec![]).unwrap();
+    // Hotkey updated with no stake moves.
+    assert_eq!(vault.get_vault_hotkey(), accounts.charlie);
+}
+
+#[ink::test]
+fn set_hotkey_moves_stake_and_updates_hotkey() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    // Register mock with stake on netuid 1 so get_contract_stake returns a value
+    register_mock(10_000_000);
+    vault.set_vault_hotkey(accounts.charlie, vec![1]).unwrap();
+    assert_eq!(vault.get_vault_hotkey(), accounts.charlie);
+}
+
+#[ink::test]
+fn set_hotkey_skips_netuids_without_stake() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    // Register mock with no stake on any netuid — get_contract_stake returns
+    // NoAlphaStakeFound for all netuids, which is silently skipped.
+    register_mock_no_stake();
+    vault.set_vault_hotkey(accounts.charlie, vec![2]).unwrap();
+    assert_eq!(vault.get_vault_hotkey(), accounts.charlie);
+}
+
+// ── claim_excess_alpha liquidation guard ─────────────────────────
+
+#[ink::test]
+fn claim_excess_alpha_blocked_during_liquidation() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+    // Set the counter as if a vault is in liquidation.
+    vault.set_active_liquidation_count_for_test(1);
+    register_mock(15_000_000); // more stake than tracked collateral
+    let result = vault.claim_excess_alpha(1);
+    assert_eq!(result, Err(Error::ActiveLiquidationsExist));
+}
+
+#[ink::test]
+fn claim_excess_alpha_succeeds_when_no_liquidation() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+    // Counter is 0 — should succeed.
+    register_mock(15_000_000); // 5M excess over the 10M in create_test_vault
+    create_test_vault(&mut vault, accounts.alice, 10_000_000);
+    // Now netuid_total_collateral = 10M, stake mock = 15M, excess = 5M
+    vault.claim_excess_alpha(1).unwrap();
+}
+
+// ── transfer_native_to_treasury ──────────────────────────────────
+
+#[ink::test]
+fn transfer_native_to_treasury_rejects_non_governance() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.bob);
+    let result = vault.transfer_native_to_treasury();
+    assert_eq!(result, Err(Error::NotGovernance));
+}
+
+#[ink::test]
+fn transfer_native_to_treasury_blocked_during_liquidation() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    vault.set_active_liquidation_count_for_test(1);
+    let result = vault.transfer_native_to_treasury();
+    assert_eq!(result, Err(Error::ActiveLiquidationsExist));
+}
+
+#[ink::test]
+fn transfer_native_to_treasury_not_blocked_by_auth_when_governance() {
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    // Active liquidation count is 0, caller is governance —
+    // should NOT return NotGovernance or ActiveLiquidationsExist.
+    let result = vault.transfer_native_to_treasury();
+    assert_ne!(result, Err(Error::NotGovernance));
+    assert_ne!(result, Err(Error::ActiveLiquidationsExist));
+}
+
+// ── Counter integrity ────────────────────────────────────────────
+
+#[ink::test]
+fn liquidation_counter_setter_getter_roundtrip() {
+    let (mut vault, _accounts) = setup();
+    assert_eq!(vault.get_active_liquidation_count(), 0);
+    vault.set_active_liquidation_count_for_test(3);
+    assert_eq!(vault.get_active_liquidation_count(), 3);
+    vault.set_active_liquidation_count_for_test(0);
+    assert_eq!(vault.get_active_liquidation_count(), 0);
+}
+

@@ -1,4 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![allow(clippy::enum_variant_names)]
+#![allow(clippy::type_complexity)]
 
 pub use self::governance::{
     CouncilSet, GovernanceParams, MaintainerChanged, Proposal, ProposalExecuted, ProposalFinalized,
@@ -599,6 +601,28 @@ mod governance {
         #[ink(message)]
         pub fn vault_unpause(&mut self) -> Result<()> {
             self.forward_vault_unpause()
+        }
+
+        /// Returns the vault's staking hotkey address.
+        #[ink(message)]
+        pub fn vault_get_hotkey(&self) -> AccountId {
+            self.forward_vault_get_hotkey()
+        }
+
+        /// Migrates the vault's staking hotkey to a new address. Maintainer-only.
+        #[ink(message)]
+        pub fn vault_set_hotkey(
+            &mut self,
+            new_hotkey: AccountId,
+            netuids: Vec<u16>,
+        ) -> Result<()> {
+            self.forward_vault_set_hotkey(new_hotkey, netuids)
+        }
+
+        /// Transfers the vault's native TAO balance to the treasury. Maintainer-only.
+        #[ink(message)]
+        pub fn vault_transfer_native_to_treasury(&mut self) -> Result<()> {
+            self.forward_vault_transfer_native_to_treasury()
         }
 
         /// Claims excess alpha on a subnet from the vault and sends the TAO to treasury.

@@ -63,12 +63,39 @@ impl TusdtGovernance {
         self.vault.unpause().map_err(|_| Error::VaultCallFailed)
     }
 
+    /// Reads the vault's staking hotkey. No authorization needed (read-only).
+    pub(crate) fn forward_vault_get_hotkey(&self) -> AccountId {
+        self.vault.get_vault_hotkey()
+    }
+
+    /// Migrates the vault's staking hotkey to a new address. Maintainer-only.
+    /// Delegates to `vault.set_vault_hotkey(new_hotkey, netuids)`.
+    pub(crate) fn forward_vault_set_hotkey(
+        &mut self,
+        new_hotkey: AccountId,
+        netuids: Vec<u16>,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .set_vault_hotkey(new_hotkey, netuids)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
     /// Claims excess alpha on a subnet from the vault and sends the TAO to treasury.
     /// Maintainer-only. Delegates to `vault.claim_excess_alpha(netuid)`.
     pub(crate) fn forward_vault_claim_excess_alpha(&mut self, netuid: u16) -> Result<()> {
         self.ensure_maintainer()?;
         self.vault
             .claim_excess_alpha(netuid)
+            .map_err(|_| Error::VaultCallFailed)
+    }
+
+    /// Transfers the vault's native TAO balance to the treasury. Maintainer-only.
+    /// Delegates to `vault.transfer_native_to_treasury()`.
+    pub(crate) fn forward_vault_transfer_native_to_treasury(&mut self) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.vault
+            .transfer_native_to_treasury()
             .map_err(|_| Error::VaultCallFailed)
     }
 
