@@ -641,15 +641,9 @@ mod vault {
                 .checked_add(CONTRACT_PARAMS_TIMELOCK_MS)
                 .ok_or(Error::ArithmeticError)?;
             self.pending_contract_params_updates
-                .insert(netuid, &PendingContractParamsUpdate {
-                    params,
-                    execute_after,
-                });
+                .insert(netuid, &PendingContractParamsUpdate { params, execute_after });
 
-            self.env().emit_event(ContractParamsUpdateScheduled {
-                params,
-                execute_after,
-            });
+            self.env().emit_event(ContractParamsUpdateScheduled { params, execute_after });
 
             Ok(())
         }
@@ -669,9 +663,7 @@ mod vault {
             self.netuid_params.insert(netuid, &new_params);
             self.pending_contract_params_updates.remove(netuid);
 
-            self.env().emit_event(ContractParamsUpdated {
-                params: pending.params,
-            });
+            self.env().emit_event(ContractParamsUpdated { params: pending.params });
 
             Ok(())
         }
@@ -687,9 +679,7 @@ mod vault {
                 .ok_or(Error::NoPendingContractParamsUpdate)?;
             self.pending_contract_params_updates.remove(netuid);
 
-            self.env().emit_event(ContractParamsUpdateCancelled {
-                params: pending.params,
-            });
+            self.env().emit_event(ContractParamsUpdateCancelled { params: pending.params });
 
             Ok(())
         }
@@ -707,15 +697,10 @@ mod vault {
                 .block_timestamp()
                 .checked_add(CONTRACT_PARAMS_TIMELOCK_MS)
                 .ok_or(Error::ArithmeticError)?;
-            self.pending_global_params_update = Some(PendingGlobalParamsUpdate {
-                params: config,
-                execute_after,
-            });
+            self.pending_global_params_update =
+                Some(PendingGlobalParamsUpdate { params: config, execute_after });
 
-            self.env().emit_event(GlobalParamsUpdateScheduled {
-                params: config,
-                execute_after,
-            });
+            self.env().emit_event(GlobalParamsUpdateScheduled { params: config, execute_after });
 
             Ok(())
         }
@@ -723,9 +708,8 @@ mod vault {
         /// Executes the currently scheduled global-parameter update once its timelock has elapsed.
         #[ink(message)]
         pub fn execute_global_params_update(&mut self) -> Result<()> {
-            let pending = self
-                .pending_global_params_update
-                .ok_or(Error::NoPendingContractParamsUpdate)?;
+            let pending =
+                self.pending_global_params_update.ok_or(Error::NoPendingContractParamsUpdate)?;
             if self.env().block_timestamp() < pending.execute_after {
                 return Err(Error::ContractParamsUpdateTimelockActive);
             }
@@ -733,9 +717,7 @@ mod vault {
             self.global_params = Self::global_params_from_config(pending.params)?;
             self.pending_global_params_update = None;
 
-            self.env().emit_event(GlobalParamsUpdated {
-                params: pending.params,
-            });
+            self.env().emit_event(GlobalParamsUpdated { params: pending.params });
 
             Ok(())
         }
@@ -750,9 +732,7 @@ mod vault {
                 .take()
                 .ok_or(Error::NoPendingContractParamsUpdate)?;
 
-            self.env().emit_event(GlobalParamsUpdateCancelled {
-                params: pending.params,
-            });
+            self.env().emit_event(GlobalParamsUpdateCancelled { params: pending.params });
 
             Ok(())
         }
@@ -768,10 +748,7 @@ mod vault {
             let previous_governance = self.governance;
             self.governance = new_governance;
 
-            self.env().emit_event(VaultGovernanceUpdated {
-                previous_governance,
-                new_governance,
-            });
+            self.env().emit_event(VaultGovernanceUpdated { previous_governance, new_governance });
 
             Ok(())
         }
@@ -784,10 +761,7 @@ mod vault {
             let previous_treasury = self.treasury;
             self.treasury = new_treasury;
 
-            self.env().emit_event(VaultTreasuryUpdated {
-                previous_treasury,
-                new_treasury,
-            });
+            self.env().emit_event(VaultTreasuryUpdated { previous_treasury, new_treasury });
 
             Ok(())
         }
@@ -800,10 +774,7 @@ mod vault {
             let previous_platform = self.platform;
             self.platform = new_platform;
 
-            self.env().emit_event(VaultPlatformUpdated {
-                previous_platform,
-                new_platform,
-            });
+            self.env().emit_event(VaultPlatformUpdated { previous_platform, new_platform });
 
             Ok(())
         }
@@ -829,10 +800,7 @@ mod vault {
             self.ensure_governance()?;
             let old_auction = self.auction.to_account_id();
             self.auction = TusdtAuctionRef::from_account_id(new_auction);
-            self.env().emit_event(AuctionAddressUpdated {
-                old_auction,
-                new_auction,
-            });
+            self.env().emit_event(AuctionAddressUpdated { old_auction, new_auction });
             Ok(())
         }
 
@@ -843,10 +811,7 @@ mod vault {
             self.ensure_governance()?;
             let old_oracle = self.oracle.to_account_id();
             self.oracle = TusdtOracleRef::from_account_id(new_oracle);
-            self.env().emit_event(OracleAddressUpdated {
-                old_oracle,
-                new_oracle,
-            });
+            self.env().emit_event(OracleAddressUpdated { old_oracle, new_oracle });
             Ok(())
         }
 
@@ -858,10 +823,7 @@ mod vault {
             self.ensure_governance()?;
             let old_token = self.token.to_account_id();
             self.token = TusdtErc20Ref::from_account_id(new_token);
-            self.env().emit_event(TokenAddressUpdated {
-                old_token,
-                new_token,
-            });
+            self.env().emit_event(TokenAddressUpdated { old_token, new_token });
             Ok(())
         }
 
@@ -912,14 +874,9 @@ mod vault {
         #[ink(message)]
         pub fn claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
             self.ensure_governance_or_platform()?;
-            self.token
-                .transfer(self.treasury, amount)
-                .map_err(|_| Error::TransferFailed)?;
+            self.token.transfer(self.treasury, amount).map_err(|_| Error::TransferFailed)?;
 
-            self.env().emit_event(SurplusTusdtClaimed {
-                recipient: self.treasury,
-                amount,
-            });
+            self.env().emit_event(SurplusTusdtClaimed { recipient: self.treasury, amount });
 
             Ok(())
         }
@@ -953,9 +910,7 @@ mod vault {
                 return Ok(());
             }
 
-            let excess = current_stake
-                .checked_sub(netuid_total)
-                .ok_or(Error::ArithmeticError)?;
+            let excess = current_stake.checked_sub(netuid_total).ok_or(Error::ArithmeticError)?;
 
             // Snapshot native TAO balance before unstaking.
             let balance_before = self.env().balance();
@@ -968,9 +923,8 @@ mod vault {
 
             // Read the actual TAO received from the balance change.
             let balance_after = self.env().balance();
-            let tao_received = balance_after
-                .checked_sub(balance_before)
-                .ok_or(Error::ArithmeticError)?;
+            let tao_received =
+                balance_after.checked_sub(balance_before).ok_or(Error::ArithmeticError)?;
 
             // Transfer TAO to treasury.
             if tao_received > 0 {
@@ -999,11 +953,7 @@ mod vault {
         /// Netuids with no stake are silently skipped. The hotkey is only updated
         /// after all moves succeed (the extrinsic is atomic — partial success rolls back).
         #[ink(message)]
-        pub fn set_vault_hotkey(
-            &mut self,
-            new_hotkey: AccountId,
-            netuids: Vec<u16>,
-        ) -> Result<()> {
+        pub fn set_vault_hotkey(&mut self, new_hotkey: AccountId, netuids: Vec<u16>) -> Result<()> {
             self.ensure_governance()?;
             self.ensure_no_active_liquidations()?;
 
@@ -1029,10 +979,7 @@ mod vault {
 
             self.vault_hotkey = new_hotkey;
 
-            self.env().emit_event(VaultHotkeyChanged {
-                old_hotkey,
-                new_hotkey,
-            });
+            self.env().emit_event(VaultHotkeyChanged { old_hotkey, new_hotkey });
 
             Ok(())
         }
@@ -1058,9 +1005,7 @@ mod vault {
                     .map_err(|_| Error::TransferFailed)?;
             }
 
-            self.env().emit_event(NativeTransferredToTreasury {
-                amount: transfer_amount,
-            });
+            self.env().emit_event(NativeTransferredToTreasury { amount: transfer_amount });
 
             Ok(())
         }
@@ -1106,9 +1051,8 @@ mod vault {
 
             let (_, projected_total) = self.ensure_collateral_bounds(netuid, 0, amount)?;
             let netuid_total = self.netuid_total_collateral.get(netuid).unwrap_or_default();
-            let projected_netuid = netuid_total
-                .checked_add(amount)
-                .ok_or(Error::ArithmeticError)?;
+            let projected_netuid =
+                netuid_total.checked_add(amount).ok_or(Error::ArithmeticError)?;
 
             let timestamp = self.env().block_timestamp();
 
@@ -1137,20 +1081,13 @@ mod vault {
                     .map_err(|_| Error::TransferFailed)?;
             }
             // Refund excess if caller sent more than the fee.
-            let excess = transferred
-                .checked_sub(vault_creation_fee)
-                .ok_or(Error::ArithmeticError)?;
+            let excess =
+                transferred.checked_sub(vault_creation_fee).ok_or(Error::ArithmeticError)?;
             if excess > 0 {
-                self.env()
-                    .transfer(caller, excess)
-                    .map_err(|_| Error::TransferFailed)?;
+                self.env().transfer(caller, excess).map_err(|_| Error::TransferFailed)?;
             }
 
-            self.env().emit_event(VaultCreated {
-                owner: caller,
-                vault_id,
-                amount,
-            });
+            self.env().emit_event(VaultCreated { owner: caller, vault_id, amount });
 
             Ok(vault_id)
         }
@@ -1182,24 +1119,15 @@ mod vault {
             let (projected_vault, projected_total) =
                 self.ensure_collateral_bounds(vault.netuid, vault.collateral_balance, amount)?;
 
-            let netuid_total = self
-                .netuid_total_collateral
-                .get(vault.netuid)
-                .unwrap_or_default();
+            let netuid_total = self.netuid_total_collateral.get(vault.netuid).unwrap_or_default();
             vault.collateral_balance = projected_vault;
             self.total_collateral_balance = projected_total;
-            let projected_netuid = netuid_total
-                .checked_add(amount)
-                .ok_or(Error::ArithmeticError)?;
-            self.netuid_total_collateral
-                .insert(vault.netuid, &projected_netuid);
+            let projected_netuid =
+                netuid_total.checked_add(amount).ok_or(Error::ArithmeticError)?;
+            self.netuid_total_collateral.insert(vault.netuid, &projected_netuid);
             self.save_vault(caller, vault_id, &vault)?;
 
-            self.env().emit_event(CollateralAdded {
-                owner: caller,
-                vault_id,
-                amount,
-            });
+            self.env().emit_event(CollateralAdded { owner: caller, vault_id, amount });
 
             Ok(())
         }
@@ -1220,33 +1148,22 @@ mod vault {
 
             let price = self.current_collateral_price(vault.netuid)?;
 
-            let max_borrow = self.max_borrow_allowed(
-                vault.netuid,
-                price,
-                vault.collateral_balance,
-            )?;
-            let projected_borrowed = vault
-                .borrowed_token_balance
-                .checked_add(amount)
-                .ok_or(Error::ArithmeticError)?;
+            let max_borrow =
+                self.max_borrow_allowed(vault.netuid, price, vault.collateral_balance)?;
+            let projected_borrowed =
+                vault.borrowed_token_balance.checked_add(amount).ok_or(Error::ArithmeticError)?;
             if projected_borrowed > max_borrow {
                 return Err(Error::CollateralRatioExceeded);
             }
 
             if amount > 0 {
-                self.token
-                    .mint(caller, amount)
-                    .map_err(|_| Error::TransferFailed)?;
+                self.token.mint(caller, amount).map_err(|_| Error::TransferFailed)?;
             }
 
             vault.borrowed_token_balance = projected_borrowed;
             self.save_vault(caller, vault_id, &vault)?;
 
-            self.env().emit_event(TokensBorrowed {
-                owner: caller,
-                vault_id,
-                amount,
-            });
+            self.env().emit_event(TokensBorrowed { owner: caller, vault_id, amount });
 
             Ok(())
         }
@@ -1269,21 +1186,13 @@ mod vault {
             }
             self.ensure_token_balance_at_least(caller, amount)?;
 
-            self.token
-                .burn(caller, amount)
-                .map_err(|_| Error::TransferFailed)?;
+            self.token.burn(caller, amount).map_err(|_| Error::TransferFailed)?;
 
-            vault.borrowed_token_balance = vault
-                .borrowed_token_balance
-                .checked_sub(amount)
-                .ok_or(Error::ArithmeticError)?;
+            vault.borrowed_token_balance =
+                vault.borrowed_token_balance.checked_sub(amount).ok_or(Error::ArithmeticError)?;
             self.save_vault(caller, vault_id, &vault)?;
 
-            self.env().emit_event(TokensRepaid {
-                owner: caller,
-                vault_id,
-                amount,
-            });
+            self.env().emit_event(TokensRepaid { owner: caller, vault_id, amount });
 
             Ok(())
         }
@@ -1306,10 +1215,8 @@ mod vault {
                 return Err(Error::InsufficientCollateral);
             }
 
-            let projected_collateral = vault
-                .collateral_balance
-                .checked_sub(amount)
-                .ok_or(Error::ArithmeticError)?;
+            let projected_collateral =
+                vault.collateral_balance.checked_sub(amount).ok_or(Error::ArithmeticError)?;
             if vault.borrowed_token_balance > 0 {
                 let price = self.current_collateral_price(vault.netuid)?;
                 let max_borrow_after_release =
@@ -1325,14 +1232,9 @@ mod vault {
                 .transfer_stake(dest_coldkey, self.vault_hotkey, vault.netuid, vault.netuid, amount)
                 .map_err(|_| Error::ChainExtensionFailed)?;
 
-            self.total_collateral_balance = self
-                .total_collateral_balance
-                .checked_sub(amount)
-                .ok_or(Error::ArithmeticError)?;
-            let netuid_total = self
-                .netuid_total_collateral
-                .get(vault.netuid)
-                .unwrap_or_default();
+            self.total_collateral_balance =
+                self.total_collateral_balance.checked_sub(amount).ok_or(Error::ArithmeticError)?;
+            let netuid_total = self.netuid_total_collateral.get(vault.netuid).unwrap_or_default();
             self.netuid_total_collateral.insert(
                 vault.netuid,
                 &netuid_total.checked_sub(amount).ok_or(Error::ArithmeticError)?,
@@ -1400,14 +1302,10 @@ mod vault {
                 .total_collateral_balance
                 .checked_sub(collateral_amount)
                 .ok_or(Error::ArithmeticError)?;
-            let netuid_total = self
-                .netuid_total_collateral
-                .get(vault.netuid)
-                .unwrap_or_default();
+            let netuid_total = self.netuid_total_collateral.get(vault.netuid).unwrap_or_default();
             self.netuid_total_collateral.insert(
                 vault.netuid,
-                &netuid_total.checked_sub(collateral_amount)
-                    .ok_or(Error::ArithmeticError)?,
+                &netuid_total.checked_sub(collateral_amount).ok_or(Error::ArithmeticError)?,
             );
             self.save_vault(owner, vault_id, &vault)?;
 
@@ -1427,20 +1325,13 @@ mod vault {
                 )
                 .map_err(|_| Error::AuctionContractCallFailed)?;
 
-            self.liquidation_auctions
-                .insert((owner, vault_id), &auction_id);
+            self.liquidation_auctions.insert((owner, vault_id), &auction_id);
 
             // Increment the active liquidation counter.
-            self.active_liquidation_count = self
-                .active_liquidation_count
-                .checked_add(1)
-                .ok_or(Error::ArithmeticError)?;
+            self.active_liquidation_count =
+                self.active_liquidation_count.checked_add(1).ok_or(Error::ArithmeticError)?;
 
-            self.env().emit_event(LiquidationAuctionCreated {
-                owner,
-                vault_id,
-                auction_id,
-            });
+            self.env().emit_event(LiquidationAuctionCreated { owner, vault_id, auction_id });
 
             Ok(auction_id)
         }
@@ -1453,23 +1344,16 @@ mod vault {
             owner: AccountId,
             vault_id: u32,
         ) -> Result<()> {
-            let auction_id = self
-                .liquidation_auctions
-                .get((owner, vault_id))
-                .ok_or(Error::AuctionNotFound)?;
+            let auction_id =
+                self.liquidation_auctions.get((owner, vault_id)).ok_or(Error::AuctionNotFound)?;
 
-            let auction = self
-                .auction
-                .get_auction(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
+            let auction = self.auction.get_auction(auction_id).ok_or(Error::AuctionNotFound)?;
 
             if !auction.is_finalized || auction.highest_bidder.is_none() {
                 return Err(Error::AuctionNotFinalized);
             }
 
-            let winner = auction
-                .highest_bidder
-                .ok_or(Error::AuctionNotFinalized)?;
+            let winner = auction.highest_bidder.ok_or(Error::AuctionNotFinalized)?;
             let winning_bid = auction.highest_bid;
 
             let mut vault = self.load_vault(owner, vault_id)?;
@@ -1492,9 +1376,8 @@ mod vault {
                 .transfer_winning_bid(auction_id, self.env().account_id())
                 .map_err(|_| Error::AuctionContractCallFailed)?;
 
-            let winner_collateral = collateral_sold
-                .checked_sub(transaction_fee)
-                .ok_or(Error::ArithmeticError)?;
+            let winner_collateral =
+                collateral_sold.checked_sub(transaction_fee).ok_or(Error::ArithmeticError)?;
 
             if transaction_fee > 0 {
                 self.transfer_transaction_fee_to_treasury(transaction_fee)?;
@@ -1510,10 +1393,8 @@ mod vault {
             // ── Effects: decrement counter only after all external calls succeed.
             //     This ensures the liquidation gate is not released prematurely
             //     if any interaction fails.
-            self.active_liquidation_count = self
-                .active_liquidation_count
-                .checked_sub(1)
-                .ok_or(Error::ArithmeticError)?;
+            self.active_liquidation_count =
+                self.active_liquidation_count.checked_sub(1).ok_or(Error::ArithmeticError)?;
 
             self.env().emit_event(VaultLiquidated {
                 owner,
@@ -1620,9 +1501,7 @@ mod vault {
             owner: AccountId,
             vault_id: u32,
         ) -> Option<Balance> {
-            self.vaults
-                .get((owner, vault_id))
-                .map(|v| v.collateral_balance)
+            self.vaults.get((owner, vault_id)).map(|v| v.collateral_balance)
         }
 
         /// Returns the total alpha collateral across all vaults (all netuids).
@@ -1644,10 +1523,7 @@ mod vault {
             owner: AccountId,
             vault_id: u32,
         ) -> Result<Balance> {
-            let vault = self
-                .vaults
-                .get((owner, vault_id))
-                .ok_or(Error::VaultNotFound)?;
+            let vault = self.vaults.get((owner, vault_id)).ok_or(Error::VaultNotFound)?;
             let price = self.current_collateral_price(vault.netuid)?;
             Self::collateral_value(price, vault.collateral_balance)
         }
@@ -1656,10 +1532,7 @@ mod vault {
         /// and the configured collateral ratio for its netuid.
         #[ink(message)]
         pub fn get_max_borrow(&self, owner: AccountId, vault_id: u32) -> Result<Balance> {
-            let vault = self
-                .vaults
-                .get((owner, vault_id))
-                .ok_or(Error::VaultNotFound)?;
+            let vault = self.vaults.get((owner, vault_id)).ok_or(Error::VaultNotFound)?;
             let price = self.current_collateral_price(vault.netuid)?;
             let max = self.max_borrow_allowed(vault.netuid, price, vault.collateral_balance)?;
 
@@ -1733,11 +1606,7 @@ mod vault {
             let info = self
                 .env()
                 .extension()
-                .get_stake_info_for_hotkey_coldkey_netuid(
-                    self.vault_hotkey,
-                    contract_addr,
-                    netuid,
-                )
+                .get_stake_info_for_hotkey_coldkey_netuid(self.vault_hotkey, contract_addr, netuid)
                 .map_err(|_| Error::ChainExtensionFailed)?
                 .ok_or(Error::NoAlphaStakeFound)?;
 
@@ -1753,9 +1622,7 @@ mod vault {
 
         /// Returns the active params for a netuid, falling back to defaults when none configured.
         fn get_params(&self, netuid: u16) -> VaultContractParams {
-            self.netuid_params
-                .get(netuid)
-                .unwrap_or_else(Self::default_contract_params)
+            self.netuid_params.get(netuid).unwrap_or_else(Self::default_contract_params)
         }
 
         /// Returns the collateral price for a given subnet: TUSDT per alpha unit.
@@ -1785,9 +1652,7 @@ mod vault {
             let alpha_to_tao = Self::alpha_price_rao_to_ratio(alpha_price_rao)?;
 
             // TUSDT per alpha = TUSDT per TAO × (alpha per TAO)
-            tusdt_per_tao
-                .checked_mul(alpha_to_tao)
-                .ok_or(Error::ArithmeticError)
+            tusdt_per_tao.checked_mul(alpha_to_tao).ok_or(Error::ArithmeticError)
         }
 
         /// Validates oracle price data: ensures a price exists, is non-stale (within
@@ -1798,9 +1663,7 @@ mod vault {
             max_oracle_age_ms: u64,
         ) -> Result<PriceData> {
             let price_data = price_data.ok_or(Error::OraclePriceUnavailable)?;
-            let age = now
-                .checked_sub(price_data.committed_at)
-                .ok_or(Error::OraclePriceStale)?;
+            let age = now.checked_sub(price_data.committed_at).ok_or(Error::OraclePriceStale)?;
             if age > max_oracle_age_ms {
                 return Err(Error::OraclePriceStale);
             }
@@ -1928,9 +1791,7 @@ mod vault {
             self.auction
                 .update_governance(new_governance)
                 .map_err(|_| Error::AuctionContractCallFailed)?;
-            self.oracle
-                .update_governance(new_governance)
-                .map_err(|_| Error::OracleCallFailed)?;
+            self.oracle.update_governance(new_governance).map_err(|_| Error::OracleCallFailed)?;
             Ok(())
         }
 
@@ -1978,8 +1839,7 @@ mod vault {
             vault_id: u32,
             auction_id: u32,
         ) {
-            self.liquidation_auctions
-                .insert((owner, vault_id), &auction_id);
+            self.liquidation_auctions.insert((owner, vault_id), &auction_id);
         }
 
         /// Set the active liquidation counter directly (bypasses the normal

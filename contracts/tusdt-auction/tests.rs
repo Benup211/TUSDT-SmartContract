@@ -18,15 +18,7 @@ fn create_default_auction(
     vault_id: u32,
 ) -> u32 {
     contract
-        .create_auction(
-            vault_owner,
-            vault_id,
-            1_000,
-            500,
-            550,
-            Ratio::from_integer(2),
-            Some(1_000),
-        )
+        .create_auction(vault_owner, vault_id, 1_000, 500, 550, Ratio::from_integer(2), Some(1_000))
         .expect("create_auction should succeed")
 }
 
@@ -56,14 +48,9 @@ fn create_auction_works() {
     assert_eq!(auction_id, 0);
     assert_eq!(auction.get_total_auctions_count(), 1);
     assert_eq!(auction.get_active_auctions_count(), 1);
-    assert_eq!(
-        auction.get_active_vault_auction(accounts.bob, 7),
-        Some(auction_id)
-    );
+    assert_eq!(auction.get_active_vault_auction(accounts.bob, 7), Some(auction_id));
 
-    let created = auction
-        .get_auction(auction_id)
-        .expect("auction should exist");
+    let created = auction.get_auction(auction_id).expect("auction should exist");
     assert_eq!(created.vault_owner, accounts.bob);
     assert_eq!(created.vault_id, 7);
     assert_eq!(created.collateral_balance, 1_000);
@@ -125,15 +112,7 @@ fn create_auction_fails_on_invalid_duration() {
     let mut auction = TusdtAuction::new(accounts.alice, accounts.bob, accounts.charlie);
 
     assert_eq!(
-        auction.create_auction(
-            accounts.bob,
-            1,
-            1_000,
-            400,
-            440,
-            Ratio::from_integer(2),
-            Some(0)
-        ),
+        auction.create_auction(accounts.bob, 1, 1_000, 400, 440, Ratio::from_integer(2), Some(0)),
         Err(Error::InvalidDuration)
     );
     assert_eq!(
@@ -199,20 +178,12 @@ fn finalize_auction_fails_without_bids_after_end() {
 
     let auction_id = create_default_auction(&mut auction, accounts.bob, 3);
     set_time(1_200);
-    assert_eq!(
-        auction.finalize_auction(auction_id),
-        Err(Error::AuctionHasNoBids)
-    );
+    assert_eq!(auction.finalize_auction(auction_id), Err(Error::AuctionHasNoBids));
 
-    let pending = auction
-        .get_auction(auction_id)
-        .expect("auction should exist");
+    let pending = auction.get_auction(auction_id).expect("auction should exist");
     assert!(!pending.is_finalized);
     assert_eq!(auction.get_active_auctions_count(), 1);
-    assert_eq!(
-        auction.get_active_vault_auction(accounts.bob, 3),
-        Some(auction_id)
-    );
+    assert_eq!(auction.get_active_vault_auction(accounts.bob, 3), Some(auction_id));
 }
 
 #[ink::test]
@@ -239,10 +210,7 @@ fn late_bid_is_allowed_only_for_admin_when_no_bids_exist() {
     };
 
     set_time(1_200);
-    assert_eq!(
-        auction_contract.ensure_bid_allowed(&auction, accounts.bob),
-        Ok(())
-    );
+    assert_eq!(auction_contract.ensure_bid_allowed(&auction, accounts.bob), Ok(()));
     assert_eq!(
         auction_contract.ensure_bid_allowed(&auction, accounts.django),
         Err(Error::NotAdmin)
@@ -285,10 +253,7 @@ fn finalize_auction_fails_before_end() {
 
     let auction_id = create_default_auction(&mut auction, accounts.bob, 4);
     set_time(999);
-    assert_eq!(
-        auction.finalize_auction(auction_id),
-        Err(Error::AuctionNotEnded)
-    );
+    assert_eq!(auction.finalize_auction(auction_id), Err(Error::AuctionNotEnded));
 }
 
 #[ink::test]
@@ -297,10 +262,7 @@ fn governance_sets_admin() {
     let mut auction = TusdtAuction::new(accounts.alice, accounts.bob, accounts.charlie);
 
     set_caller(accounts.django);
-    assert_eq!(
-        auction.set_admin(Some(accounts.eve)),
-        Err(Error::NotGovernance)
-    );
+    assert_eq!(auction.set_admin(Some(accounts.eve)), Err(Error::NotGovernance));
 
     set_caller(accounts.bob);
     assert_eq!(auction.set_admin(Some(accounts.eve)), Ok(()));
@@ -313,20 +275,14 @@ fn controller_updates_auction_governance() {
     let mut auction = TusdtAuction::new(accounts.alice, accounts.bob, accounts.charlie);
 
     set_caller(accounts.bob);
-    assert_eq!(
-        auction.update_governance(accounts.django),
-        Err(Error::NotController)
-    );
+    assert_eq!(auction.update_governance(accounts.django), Err(Error::NotController));
 
     set_caller(accounts.alice);
     assert_eq!(auction.update_governance(accounts.django), Ok(()));
     assert_eq!(auction.governance(), accounts.django);
 
     set_caller(accounts.bob);
-    assert_eq!(
-        auction.set_admin(Some(accounts.eve)),
-        Err(Error::NotGovernance)
-    );
+    assert_eq!(auction.set_admin(Some(accounts.eve)), Err(Error::NotGovernance));
 
     set_caller(accounts.django);
     assert_eq!(auction.set_admin(Some(accounts.eve)), Ok(()));
@@ -340,15 +296,10 @@ fn finalize_auction_fails_if_already_finalized() {
     let mut auction = TusdtAuction::new(accounts.alice, accounts.bob, accounts.charlie);
 
     let auction_id = create_default_auction(&mut auction, accounts.bob, 5);
-    auction
-        .seed_bid_for_test(auction_id, accounts.eve, 600)
-        .expect("test setup should seed a bid");
+    auction.seed_bid_for_test(auction_id, accounts.eve, 600).expect("test setup should seed a bid");
     set_time(1_100);
     assert_eq!(auction.finalize_auction(auction_id), Ok(()));
-    assert_eq!(
-        auction.finalize_auction(auction_id),
-        Err(Error::AuctionFinalized)
-    );
+    assert_eq!(auction.finalize_auction(auction_id), Err(Error::AuctionFinalized));
 }
 
 #[ink::test]
@@ -358,9 +309,7 @@ fn transfer_winning_bid_fails_for_non_controller() {
     let mut auction = TusdtAuction::new(accounts.alice, accounts.bob, accounts.charlie);
 
     let auction_id = create_default_auction(&mut auction, accounts.bob, 6);
-    auction
-        .seed_bid_for_test(auction_id, accounts.eve, 600)
-        .expect("test setup should seed a bid");
+    auction.seed_bid_for_test(auction_id, accounts.eve, 600).expect("test setup should seed a bid");
     set_time(1_100);
     assert_eq!(auction.finalize_auction(auction_id), Ok(()));
 
@@ -377,9 +326,7 @@ fn transfer_winning_bid_fails_before_finalize() {
     let mut auction = TusdtAuction::new(accounts.alice, accounts.bob, accounts.charlie);
 
     let auction_id = create_default_auction(&mut auction, accounts.bob, 7);
-    auction
-        .seed_bid_for_test(auction_id, accounts.eve, 600)
-        .expect("test setup should seed a bid");
+    auction.seed_bid_for_test(auction_id, accounts.eve, 600).expect("test setup should seed a bid");
 
     assert_eq!(
         auction.transfer_winning_bid(auction_id, accounts.django),
@@ -431,18 +378,14 @@ fn get_active_auctions_updates_after_finalize() {
 
     let first = create_default_auction(&mut auction, accounts.bob, 11);
     let second = create_default_auction(&mut auction, accounts.bob, 12);
-    auction
-        .seed_bid_for_test(first, accounts.eve, 600)
-        .expect("test setup should seed a bid");
+    auction.seed_bid_for_test(first, accounts.eve, 600).expect("test setup should seed a bid");
     assert_eq!(first, 0);
     assert_eq!(second, 1);
 
     set_time(2_000);
     assert_eq!(auction.finalize_auction(first), Ok(()));
 
-    let active = auction
-        .get_active_auctions(0)
-        .expect("active auctions should have one entry");
+    let active = auction.get_active_auctions(0).expect("active auctions should have one entry");
     assert_eq!(active.len(), 1);
     assert_eq!(active[0].id, second);
     assert_eq!(auction.get_active_auctions_count(), 1);
@@ -470,9 +413,7 @@ fn get_auction_bid_returns_bid_for_bidder() {
         .seed_bid_for_test(auction_id, accounts.django, 600)
         .expect("test setup should seed a bid");
 
-    let bid = auction
-        .get_auction_bid(auction_id, accounts.django)
-        .expect("bid should exist");
+    let bid = auction.get_auction_bid(auction_id, accounts.django).expect("bid should exist");
     assert_eq!(bid.id, 0);
     assert_eq!(bid.auction_id, auction_id);
     assert_eq!(bid.bidder, accounts.django);
@@ -487,8 +428,5 @@ fn withdraw_refund_fails_when_bid_not_found() {
     let mut auction = TusdtAuction::new(accounts.alice, accounts.bob, accounts.charlie);
 
     let auction_id = create_default_auction(&mut auction, accounts.bob, 15);
-    assert_eq!(
-        auction.withdraw_refund(auction_id, 0),
-        Err(Error::BidNotFound)
-    );
+    assert_eq!(auction.withdraw_refund(auction_id, 0), Err(Error::BidNotFound));
 }

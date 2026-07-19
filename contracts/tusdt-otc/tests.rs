@@ -21,10 +21,14 @@ struct MockExtension {
 }
 
 impl test::ChainExtension for MockExtension {
-    fn ext_id(&self) -> u16 { 0x1000 }
+    fn ext_id(&self) -> u16 {
+        0x1000
+    }
 
     fn call(&mut self, func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
-        if self.should_fail { return 1; }
+        if self.should_fail {
+            return 1;
+        }
         match func_id {
             0 => {
                 let info = self.stake.map(|s| StakeInfo {
@@ -40,28 +44,40 @@ impl test::ChainExtension for MockExtension {
                 });
                 ink::scale::Encode::encode_to(&info, output);
                 0
-            }
+            },
             15 => {
                 let price: u64 = 1_000_000_000;
                 ink::scale::Encode::encode_to(&price, output);
                 0
-            }
-            2 => 0,   // remove_stake success
+            },
+            2 => 0, // remove_stake success
             // 6 = transfer_stake (contract-owned), 25 = caller_transfer_stake (pull)
             6 | 25 => {
-                if self.transfer_fails { 2 } else { 0 }
-            }
+                if self.transfer_fails {
+                    2
+                } else {
+                    0
+                }
+            },
             _ => 1,
         }
     }
 }
 
 fn register_mock(stake: u64) {
-    test::register_chain_extension(MockExtension { stake: Some(stake), should_fail: false, transfer_fails: false });
+    test::register_chain_extension(MockExtension {
+        stake: Some(stake),
+        should_fail: false,
+        transfer_fails: false,
+    });
 }
 
 fn register_mock_failing_transfer(stake: u64) {
-    test::register_chain_extension(MockExtension { stake: Some(stake), should_fail: false, transfer_fails: true });
+    test::register_chain_extension(MockExtension {
+        stake: Some(stake),
+        should_fail: false,
+        transfer_fails: true,
+    });
 }
 
 // ── Basic tests ────────────────────────────────────────────────────
@@ -94,7 +110,9 @@ fn non_owner_cannot_pause() {
 fn create_order_rejects_zero_price() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
-    assert!(otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 0, 1_000_000).is_err());
+    assert!(otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 0, 1_000_000)
+        .is_err());
 }
 
 #[ink::test]
@@ -113,7 +131,9 @@ fn cancel_order_fails_for_non_maker() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(1_000_000);
-    let id = otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    let id = otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000)
+        .unwrap();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.bob);
     assert_eq!(otc.cancel_order(id), Err(Error::NotMaker));
 }
@@ -123,7 +143,9 @@ fn fulfill_order_rejects_maker_as_taker() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(1_000_000);
-    let id = otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    let id = otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000)
+        .unwrap();
     assert_eq!(otc.fulfill_order(id), Err(Error::CannotFulfillOwnOrder));
 }
 
@@ -145,9 +167,15 @@ fn scenario1_sell_pull_failure_leaves_no_state() {
     // (e.g. she lacks stake under the contract hotkey on that subnet).
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock_failing_transfer(0);
-    let result = otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000);
-    assert_eq!(result, Err(Error::ChainExtensionFailed),
-        "failed pull rejects order creation");
+    let result = otc.create_order(
+        1,
+        OrderSide::Sell,
+        Collateral::Native,
+        Collateral::Tusdt,
+        10_000,
+        1_000_000,
+    );
+    assert_eq!(result, Err(Error::ChainExtensionFailed), "failed pull rejects order creation");
 
     // No order was created and no alpha was reserved.
     assert!(otc.get_order(0).is_none(), "no order created on failed pull");
@@ -165,15 +193,18 @@ fn scenario2_cancel_order_same_key_only() {
     // Alice creates a Sell order (Native collateral, wants TUSDT)
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(5_000_000);
-    let order_id = otc.create_order(
-        1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 5_000_000
-    ).unwrap();
+    let order_id = otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 5_000_000)
+        .unwrap();
     assert_eq!(otc.get_order(order_id).unwrap().status, OrderStatus::Active);
 
     // Bob cannot cancel Alice's order
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.bob);
-    assert_eq!(otc.cancel_order(order_id), Err(Error::NotMaker),
-        "wrong key rejected for cancellation");
+    assert_eq!(
+        otc.cancel_order(order_id),
+        Err(Error::NotMaker),
+        "wrong key rejected for cancellation"
+    );
 
     // Alice cancels — alpha returned via transfer_stake (needs mock)
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
@@ -183,8 +214,11 @@ fn scenario2_cancel_order_same_key_only() {
 
     // Verify cancelled order cannot be fulfilled
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.bob);
-    assert_eq!(otc.fulfill_order(order_id), Err(Error::OrderNotActive),
-        "cancelled order rejects fulfillment");
+    assert_eq!(
+        otc.fulfill_order(order_id),
+        Err(Error::OrderNotActive),
+        "cancelled order rejects fulfillment"
+    );
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -199,9 +233,16 @@ fn scenario3_fulfill_transfer_fails_order_stays_active() {
     // to avoid cross-contract ERC20 calls (not supported in off-chain engine).
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(10_000_000);
-    let order_id = otc.create_order(
-        1, OrderSide::Sell, Collateral::Native, Collateral::Native, 10_000, 10_000_000
-    ).unwrap();
+    let order_id = otc
+        .create_order(
+            1,
+            OrderSide::Sell,
+            Collateral::Native,
+            Collateral::Native,
+            10_000,
+            10_000_000,
+        )
+        .unwrap();
 
     // Bob tries to fulfill — transfer_stake fails.  Bob "sends" TAO.
     register_mock_failing_transfer(10_000_000);
@@ -212,8 +253,11 @@ fn scenario3_fulfill_transfer_fails_order_stays_active() {
 
     // CRITICAL: Order stays Active (not Fulfilled, not stuck in limbo)
     let order = otc.get_order(order_id).unwrap();
-    assert_eq!(order.status, OrderStatus::Active,
-        "Order remains Active after failed fulfillment — no partial state");
+    assert_eq!(
+        order.status,
+        OrderStatus::Active,
+        "Order remains Active after failed fulfillment — no partial state"
+    );
 
     // Order can still be cancelled (needs mock for alpha return)
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
@@ -253,7 +297,9 @@ fn probe_cannot_cancel_twice() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(5_000_000);
-    let id = otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 5_000_000).unwrap();
+    let id = otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 5_000_000)
+        .unwrap();
     otc.cancel_order(id).unwrap();
     assert_eq!(otc.cancel_order(id), Err(Error::OrderNotActive), "double cancel rejected");
 }
@@ -263,7 +309,9 @@ fn probe_cancel_then_fulfill_rejected() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(5_000_000);
-    let id = otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 5_000_000).unwrap();
+    let id = otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 5_000_000)
+        .unwrap();
     otc.cancel_order(id).unwrap();
 
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.bob);
@@ -274,7 +322,9 @@ fn probe_cancel_then_fulfill_rejected() {
 fn probe_order_requires_collateral_amount_not_zero() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
-    assert!(otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 0).is_err());
+    assert!(otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 0)
+        .is_err());
 }
 
 // ── Reserved alpha tracking ──────────────────────────────────────────
@@ -285,7 +335,8 @@ fn sell_order_increments_reserved_alpha() {
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(1_000_000);
     assert_eq!(otc.get_reserved_alpha(1), 0);
-    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000)
+        .unwrap();
     assert_eq!(otc.get_reserved_alpha(1), 1_000_000);
 }
 
@@ -294,7 +345,9 @@ fn cancel_sell_order_decrements_reserved_alpha() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(1_000_000);
-    let id = otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    let id = otc
+        .create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000)
+        .unwrap();
     assert_eq!(otc.get_reserved_alpha(1), 1_000_000);
     otc.cancel_order(id).unwrap();
     assert_eq!(otc.get_reserved_alpha(1), 0);
@@ -312,8 +365,9 @@ fn get_reserved_alpha_returns_zero_for_unknown_netuid() {
 fn owner_can_claim_excess_alpha() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
-    register_mock(2_000_000);  // stake > reserved → 1_000_000 excess
-    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    register_mock(2_000_000); // stake > reserved → 1_000_000 excess
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000)
+        .unwrap();
     assert_eq!(otc.get_reserved_alpha(1), 1_000_000);
 
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
@@ -325,7 +379,8 @@ fn non_owner_cannot_claim_excess_alpha() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     register_mock(2_000_000);
-    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000)
+        .unwrap();
 
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.bob);
     assert_eq!(otc.claim_excess_alpha(1, accounts.bob), Err(Error::NotOwner));
@@ -335,8 +390,9 @@ fn non_owner_cannot_claim_excess_alpha() {
 fn claim_excess_alpha_noop_when_no_excess() {
     let (mut otc, accounts) = setup();
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
-    register_mock(1_000_000);  // stake == reserved → no excess
-    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000).unwrap();
+    register_mock(1_000_000); // stake == reserved → no excess
+    otc.create_order(1, OrderSide::Sell, Collateral::Native, Collateral::Tusdt, 10_000, 1_000_000)
+        .unwrap();
 
     ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(accounts.alice);
     // Should succeed without error (no-op).

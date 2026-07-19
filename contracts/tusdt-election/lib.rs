@@ -560,12 +560,7 @@ mod election {
             // The electorate comes from governance — not committed locally. Fails if governance has
             // no snapshot yet.
             let (root, circulating_supply, netuid, snapshot_block) = self.gov_latest_snapshot()?;
-            let snapshot = ElectionSnapshot {
-                root,
-                circulating_supply,
-                netuid,
-                snapshot_block,
-            };
+            let snapshot = ElectionSnapshot { root, circulating_supply, netuid, snapshot_block };
             self.open_registration(snapshot, now, emergency)
         }
 
@@ -598,10 +593,7 @@ mod election {
 
             self.candidates.insert(
                 (self.cycle_id, candidate),
-                &Candidacy {
-                    netuid,
-                    registered_at: self.env().block_timestamp(),
-                },
+                &Candidacy { netuid, registered_at: self.env().block_timestamp() },
             );
             self.candidate_list.push(candidate);
 
@@ -657,12 +649,12 @@ mod election {
                         )
                         .ok_or(Error::ArithmeticError)?;
                     self.phase = Phase::Voting;
-                }
+                },
                 Phase::Voting => {
                     if now >= self.voting_ends_at {
                         return Err(Error::VotingClosed);
                     }
-                }
+                },
                 _ => return Err(Error::WrongPhase),
             }
             if !self.candidates.contains((self.cycle_id, candidate)) {
@@ -702,14 +694,10 @@ mod election {
             // Record the leaf's single vote: count its power once toward the >50% denominator and
             // its raw balance once toward the turnout quorum.
             self.participated.insert(vote_key, &());
-            self.total_voting_power = self
-                .total_voting_power
-                .checked_add(weight)
-                .ok_or(Error::ArithmeticError)?;
-            self.total_voted_balance = self
-                .total_voted_balance
-                .checked_add(balance)
-                .ok_or(Error::ArithmeticError)?;
+            self.total_voting_power =
+                self.total_voting_power.checked_add(weight).ok_or(Error::ArithmeticError)?;
+            self.total_voted_balance =
+                self.total_voted_balance.checked_add(balance).ok_or(Error::ArithmeticError)?;
 
             self.env().emit_event(ApprovalCast {
                 cycle_id: self.cycle_id,
@@ -740,11 +728,8 @@ mod election {
             let winner = self.leading_candidate;
 
             // Turnout quorum: raw voted balance must reach `circulating_supply * QUORUM_BPS`.
-            let circulating_supply = self
-                .election_snapshot
-                .as_ref()
-                .map(|s| s.circulating_supply)
-                .unwrap_or(0);
+            let circulating_supply =
+                self.election_snapshot.as_ref().map(|s| s.circulating_supply).unwrap_or(0);
             let quorum = circulating_supply
                 .checked_mul(u128::from(QUORUM_BPS))
                 .and_then(|x| x.checked_div(u128::from(BPS_DENOMINATOR)))
@@ -752,9 +737,8 @@ mod election {
             let quorum_met = self.total_voted_balance >= quorum;
 
             // Strict majority: best * 10_000 > total * 5_000.
-            let lhs = best
-                .checked_mul(u128::from(BPS_DENOMINATOR))
-                .ok_or(Error::ArithmeticError)?;
+            let lhs =
+                best.checked_mul(u128::from(BPS_DENOMINATOR)).ok_or(Error::ArithmeticError)?;
             let rhs = self
                 .total_voting_power
                 .checked_mul(u128::from(APPROVAL_THRESHOLD_BPS))
@@ -763,10 +747,8 @@ mod election {
 
             if has_winner {
                 let who = winner.ok_or(Error::NoWinner)?;
-                let candidacy = self
-                    .candidates
-                    .get((self.cycle_id, who))
-                    .ok_or(Error::CandidateNotFound)?;
+                let candidacy =
+                    self.candidates.get((self.cycle_id, who)).ok_or(Error::CandidateNotFound)?;
                 self.maintainer_elect = Some(MaintainerElect {
                     who,
                     netuid: candidacy.netuid,
@@ -827,9 +809,7 @@ mod election {
             // switch itself is deferred to `end_transition`, so `active_netuid` stays the previous
             // subnet and governance's snapshot remains the electorate source meanwhile.
             if elect.netuid != self.active_netuid {
-                let ends_at = now
-                    .checked_add(TRANSITION_MS)
-                    .ok_or(Error::ArithmeticError)?;
+                let ends_at = now.checked_add(TRANSITION_MS).ok_or(Error::ArithmeticError)?;
                 self.transition = Some(Transition {
                     from_netuid: self.active_netuid,
                     to_netuid: elect.netuid,
@@ -844,10 +824,8 @@ mod election {
 
             self.incumbent = elect.who;
             let served = self.terms_served.get(elect.who).unwrap_or(0);
-            self.terms_served.insert(
-                elect.who,
-                &served.checked_add(1).ok_or(Error::ArithmeticError)?,
-            );
+            self.terms_served
+                .insert(elect.who, &served.checked_add(1).ok_or(Error::ArithmeticError)?);
             self.advance_cadence()?;
             self.maintainer_elect = None;
             self.phase = Phase::Idle;
@@ -874,9 +852,7 @@ mod election {
             self.gov_election_set_netuid(transition.to_netuid)?;
             self.transition = None;
 
-            self.env().emit_event(TransitionEnded {
-                netuid: transition.to_netuid,
-            });
+            self.env().emit_event(TransitionEnded { netuid: transition.to_netuid });
             Ok(())
         }
 
@@ -890,9 +866,7 @@ mod election {
                 return Err(Error::WrongPhase);
             }
             self.emergency_pending = true;
-            self.env().emit_event(EmergencyElectionTriggered {
-                triggered_by: self.env().caller(),
-            });
+            self.env().emit_event(EmergencyElectionTriggered { triggered_by: self.env().caller() });
             Ok(())
         }
 
@@ -956,17 +930,12 @@ mod election {
         /// Recomputes the next-election anchor from the genesis anchor and the (incremented) term
         /// index, so the 2-year cadence never accumulates millisecond drift.
         fn advance_cadence(&mut self) -> Result<()> {
-            self.term_index = self
-                .term_index
-                .checked_add(1)
-                .ok_or(Error::ArithmeticError)?;
+            self.term_index = self.term_index.checked_add(1).ok_or(Error::ArithmeticError)?;
             let offset = u64::from(self.term_index)
                 .checked_mul(TERM_LENGTH_MS)
                 .ok_or(Error::ArithmeticError)?;
-            self.next_election_ts = self
-                .genesis_election_ts
-                .checked_add(offset)
-                .ok_or(Error::ArithmeticError)?;
+            self.next_election_ts =
+                self.genesis_election_ts.checked_add(offset).ok_or(Error::ArithmeticError)?;
             Ok(())
         }
 
@@ -1003,9 +972,7 @@ mod election {
         fn gov_latest_snapshot(&self) -> Result<(MerkleHash, u128, u16, u32)> {
             build_call::<tusdt_env::CustomEnvironment>()
                 .call(self.governance)
-                .exec_input(ExecutionInput::new(Selector::new(
-                    SELECTOR_ELECTION_SNAPSHOT,
-                )))
+                .exec_input(ExecutionInput::new(Selector::new(SELECTOR_ELECTION_SNAPSHOT)))
                 .returns::<Option<(MerkleHash, u128, u16, u32)>>()
                 .invoke()
                 .ok_or(Error::NoSnapshot)

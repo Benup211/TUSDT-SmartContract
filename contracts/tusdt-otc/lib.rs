@@ -130,11 +130,17 @@ mod otc {
 
     /// Emitted when ownership is transferred to a new account.
     #[ink(event)]
-    pub struct OwnerUpdated { previous: AccountId, new: AccountId }
+    pub struct OwnerUpdated {
+        previous: AccountId,
+        new: AccountId,
+    }
 
     /// Emitted when the fee rate is changed by the owner.
     #[ink(event)]
-    pub struct FeeRateUpdated { previous_bps: u32, new_bps: u32 }
+    pub struct FeeRateUpdated {
+        previous_bps: u32,
+        new_bps: u32,
+    }
 
     /// Emitted when excess alpha is unstaked and native TAO is sent to a recipient.
     #[ink(event)]
@@ -262,18 +268,19 @@ mod otc {
                         )
                         .map_err(|_| Error::ChainExtensionFailed)?;
                     // Track this Sell order's alpha as reserved.
-                    let current_reserved = self.netuid_total_reserved.get(netuid).unwrap_or_default();
+                    let current_reserved =
+                        self.netuid_total_reserved.get(netuid).unwrap_or_default();
                     self.netuid_total_reserved.insert(
                         netuid,
                         &current_reserved
                             .checked_add(alpha_amount)
                             .ok_or(Error::ArithmeticError)?,
                     );
-                }
+                },
                 OrderSide::Buy => {
                     // Pull collateral from maker now so the order is backed.
                     self.pull_collateral(caller, collateral, alpha_amount, price_bps, netuid)?;
-                }
+                },
             }
 
             let order_id = self.next_order_id;
@@ -349,16 +356,23 @@ mod otc {
                     // Contract already holds maker's alpha (deposited at creation).
                     // Send alpha to taker; taker's counter-collateral goes to maker (minus fee).
                     self.transfer_alpha_to(order.netuid, taker, order.alpha_amount)?;
-                    self.send_counter_collateral(taker, order.counter_collateral, order.maker, counter_amount, fee)?;
+                    self.send_counter_collateral(
+                        taker,
+                        order.counter_collateral,
+                        order.maker,
+                        counter_amount,
+                        fee,
+                    )?;
                     // Release reserved alpha tracking.
-                    let current_reserved = self.netuid_total_reserved.get(order.netuid).unwrap_or_default();
+                    let current_reserved =
+                        self.netuid_total_reserved.get(order.netuid).unwrap_or_default();
                     self.netuid_total_reserved.insert(
                         order.netuid,
                         &current_reserved
                             .checked_sub(order.alpha_amount)
                             .ok_or(Error::ArithmeticError)?,
                     );
-                }
+                },
                 OrderSide::Buy => {
                     // Atomic pull: transfer the taker's alpha into the contract's
                     // coldkey via the caller-forwarded chain extension, then settle.
@@ -375,8 +389,14 @@ mod otc {
                     // Send alpha from contract to maker (taker provided it).
                     self.transfer_alpha_to(order.netuid, order.maker, order.alpha_amount)?;
                     // Send maker's held collateral to taker.
-                    self.send_counter_collateral(self.env().account_id(), order.collateral, taker, counter_amount, fee)?;
-                }
+                    self.send_counter_collateral(
+                        self.env().account_id(),
+                        order.collateral,
+                        taker,
+                        counter_amount,
+                        fee,
+                    )?;
+                },
             }
 
             // All transfers succeeded — mark fulfilled.
@@ -420,13 +440,13 @@ mod otc {
                         .ok_or(Error::ArithmeticError)?
                         .checked_div(1_000_000_000)
                         .ok_or(Error::ArithmeticError)?;
-                    let locked =
-                        Balance::try_from(locked).map_err(|_| Error::ArithmeticError)?;
+                    let locked = Balance::try_from(locked).map_err(|_| Error::ArithmeticError)?;
                     self.return_collateral(order.maker, order.collateral, locked)?;
-                }
+                },
                 OrderSide::Sell => {
                     // Release reserved alpha tracking before returning stake.
-                    let current_reserved = self.netuid_total_reserved.get(order.netuid).unwrap_or_default();
+                    let current_reserved =
+                        self.netuid_total_reserved.get(order.netuid).unwrap_or_default();
                     self.netuid_total_reserved.insert(
                         order.netuid,
                         &current_reserved
@@ -435,7 +455,7 @@ mod otc {
                     );
                     // Return alpha stake back to maker.
                     self.transfer_alpha_to(order.netuid, order.maker, order.alpha_amount)?;
-                }
+                },
             }
 
             self.env().emit_event(OrderCancelled { order_id, maker: order.maker });
@@ -499,9 +519,7 @@ mod otc {
                 return Ok(());
             }
 
-            let excess = current_stake
-                .checked_sub(total_reserved)
-                .ok_or(Error::ArithmeticError)?;
+            let excess = current_stake.checked_sub(total_reserved).ok_or(Error::ArithmeticError)?;
 
             let balance_before = self.env().balance();
 
@@ -511,14 +529,11 @@ mod otc {
                 .map_err(|_| Error::ChainExtensionFailed)?;
 
             let balance_after = self.env().balance();
-            let tao_received = balance_after
-                .checked_sub(balance_before)
-                .ok_or(Error::ArithmeticError)?;
+            let tao_received =
+                balance_after.checked_sub(balance_before).ok_or(Error::ArithmeticError)?;
 
             if tao_received > 0 {
-                self.env()
-                    .transfer(recipient, tao_received)
-                    .map_err(|_| Error::TransferFailed)?;
+                self.env().transfer(recipient, tao_received).map_err(|_| Error::TransferFailed)?;
             }
 
             self.env().emit_event(ExcessAlphaClaimed {
@@ -547,15 +562,21 @@ mod otc {
 
         /// Returns the contract owner account ID.
         #[ink(message)]
-        pub fn owner(&self) -> AccountId { self.owner }
+        pub fn owner(&self) -> AccountId {
+            self.owner
+        }
 
         /// Returns the hotkey used for alpha stake operations.
         #[ink(message)]
-        pub fn hotkey(&self) -> AccountId { self.hotkey }
+        pub fn hotkey(&self) -> AccountId {
+            self.hotkey
+        }
 
         /// Returns `true` if the contract is currently paused.
         #[ink(message)]
-        pub fn is_paused(&self) -> bool { self.paused }
+        pub fn is_paused(&self) -> bool {
+            self.paused
+        }
 
         /// Returns the current fee rate in basis points (e.g. 30 = 0.3%).
         #[ink(message)]
@@ -596,7 +617,9 @@ mod otc {
                 .env()
                 .extension()
                 .get_stake_info_for_hotkey_coldkey_netuid(
-                    self.hotkey, self.env().account_id(), netuid,
+                    self.hotkey,
+                    self.env().account_id(),
+                    netuid,
                 )
                 .map_err(|_| Error::ChainExtensionFailed)?
                 .ok_or(Error::NoAlphaStakeFound)?;
@@ -631,21 +654,20 @@ mod otc {
                 .ok_or(Error::ArithmeticError)?
                 .checked_div(1_000_000_000)
                 .ok_or(Error::ArithmeticError)?;
-            let required =
-                Balance::try_from(required).map_err(|_| Error::ArithmeticError)?;
+            let required = Balance::try_from(required).map_err(|_| Error::ArithmeticError)?;
 
             match collateral {
                 Collateral::Tusdt => {
                     self.token
                         .transfer_from(maker, self.env().account_id(), required)
                         .map_err(|_| Error::TransferFailed)?;
-                }
+                },
                 Collateral::Native => {
                     let sent = self.env().transferred_value();
                     if sent < required {
                         return Err(Error::InsufficientCollateral);
                     }
-                }
+                },
             }
             Ok(())
         }
@@ -664,25 +686,20 @@ mod otc {
                     self.token
                         .transfer_from(taker, self.env().account_id(), amount)
                         .map_err(|_| Error::TransferFailed)?;
-                }
+                },
                 Collateral::Native => {
                     let sent = self.env().transferred_value();
                     if sent < amount {
                         return Err(Error::InsufficientCollateral);
                     }
-                }
+                },
             }
             Ok(())
         }
 
         /// Transfers alpha stake from the contract's coldkey to a recipient
         /// via the chain extension `transfer_stake` function.
-        fn transfer_alpha_to(
-            &mut self,
-            netuid: u16,
-            to: AccountId,
-            amount: Balance,
-        ) -> Result<()> {
+        fn transfer_alpha_to(&mut self, netuid: u16, to: AccountId, amount: Balance) -> Result<()> {
             self.env()
                 .extension()
                 .transfer_stake(to, self.hotkey, netuid, netuid, amount)
@@ -704,16 +721,12 @@ mod otc {
             match kind {
                 Collateral::Tusdt => {
                     if net > 0 {
-                        self.token
-                            .transfer(recipient, net)
-                            .map_err(|_| Error::TransferFailed)?;
+                        self.token.transfer(recipient, net).map_err(|_| Error::TransferFailed)?;
                     }
                     if fee > 0 {
-                        self.token
-                            .transfer(self.owner, fee)
-                            .map_err(|_| Error::TransferFailed)?;
+                        self.token.transfer(self.owner, fee).map_err(|_| Error::TransferFailed)?;
                     }
-                }
+                },
                 Collateral::Native => {
                     if net > 0 && self.env().transfer(recipient, net).is_err() {
                         return Err(Error::TransferFailed);
@@ -721,7 +734,7 @@ mod otc {
                     if fee > 0 && self.env().transfer(self.owner, fee).is_err() {
                         return Err(Error::TransferFailed);
                     }
-                }
+                },
             }
             Ok(())
         }
@@ -735,15 +748,13 @@ mod otc {
         ) -> Result<()> {
             match kind {
                 Collateral::Tusdt => {
-                    self.token
-                        .transfer(recipient, amount)
-                        .map_err(|_| Error::TransferFailed)?;
-                }
+                    self.token.transfer(recipient, amount).map_err(|_| Error::TransferFailed)?;
+                },
                 Collateral::Native => {
                     if self.env().transfer(recipient, amount).is_err() {
                         return Err(Error::TransferFailed);
                     }
-                }
+                },
             }
             Ok(())
         }

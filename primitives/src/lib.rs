@@ -108,9 +108,7 @@ impl Ratio {
 
     /// Multiplies this `Ratio` by another `Ratio`. Returns `None` on overflow.
     pub fn checked_mul(self, rhs: Self) -> Option<Self> {
-        self.as_fixed()
-            .checked_mul(&rhs.as_fixed())
-            .map(Self::from_fixed)
+        self.as_fixed().checked_mul(&rhs.as_fixed()).map(Self::from_fixed)
     }
 
     /// Returns the absolute difference between two `Ratio`s.
@@ -121,17 +119,13 @@ impl Ratio {
     /// Divides a `u128` value by this `Ratio` (`value / self`). Returns `None` on overflow or division by zero.
     pub fn checked_div_value(self, value: u128) -> Option<u128> {
         let value_fixed = FixedU128::checked_from_integer(value)?;
-        value_fixed
-            .checked_div(&self.as_fixed())?
-            .checked_mul_int(1_u128)
+        value_fixed.checked_div(&self.as_fixed())?.checked_mul_int(1_u128)
     }
 
     /// Divides this `Ratio` by a `u128` integer (`self / rhs`). Returns `None` on overflow.
     pub fn checked_div_int(self, rhs: u128) -> Option<Self> {
         let rhs_fixed = FixedU128::checked_from_integer(rhs)?;
-        self.as_fixed()
-            .checked_div(&rhs_fixed)
-            .map(Self::from_fixed)
+        self.as_fixed().checked_div(&rhs_fixed).map(Self::from_fixed)
     }
 
     /// Computes e^`self` using a 32-term Taylor series approximation. Returns `None` on overflow.

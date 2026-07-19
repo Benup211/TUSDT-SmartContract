@@ -38,9 +38,7 @@ fn set_vault_creation_fee_to_zero(vault: &mut TusdtVaultAlpha) {
     config.vault_creation_fee = 0;
     vault.set_global_params(config).unwrap();
     // Advance past the 24h timelock, execute, then reset time to 0.
-    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
-        24 * 60 * 60 * 1_000 + 1,
-    );
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(24 * 60 * 60 * 1_000 + 1);
     vault.execute_global_params_update().unwrap();
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(0);
 }
@@ -81,13 +79,13 @@ impl test::ChainExtension for MockExtension {
                 });
                 ink::scale::Encode::encode_to(&info, output);
                 0
-            }
+            },
             15 => {
                 // get_alpha_price — 1_000_000_000 = 1 alpha = 1 TAO
                 let price: u64 = 1_000_000_000;
                 ink::scale::Encode::encode_to(&price, output);
                 0
-            }
+            },
             // 36 = get_stake_availability
             36 => {
                 let availability = tusdt_env::StakeAvailability {
@@ -98,7 +96,7 @@ impl test::ChainExtension for MockExtension {
                 };
                 ink::scale::Encode::encode_to(&availability, output);
                 0
-            }
+            },
             // Write ops (2 = remove_stake, 5 = move_stake, 6 = transfer_stake) — no-op success
             2 | 5 | 6 => 0,
             // 25 = caller_transfer_stake (caller-forwarded pull) — honours transfer_fails
@@ -108,7 +106,7 @@ impl test::ChainExtension for MockExtension {
                 } else {
                     0
                 }
-            }
+            },
             _ => 1,
         }
     }
@@ -202,10 +200,7 @@ fn create_alpha_vault_rejects_zero_amount() {
     let (mut vault, accounts) = setup_with_approved_netuid();
     set_caller(accounts.alice);
     register_mock(100);
-    assert_eq!(
-        vault.create_alpha_vault(0, 1),
-        Err(Error::InsufficientCollateral)
-    );
+    assert_eq!(vault.create_alpha_vault(0, 1), Err(Error::InsufficientCollateral));
 }
 
 #[ink::test]
@@ -223,10 +218,7 @@ fn create_alpha_vault_pull_failure_leaves_no_state() {
     set_caller(accounts.alice);
     // The caller-forwarded pull reports a write failure (e.g. caller lacks stake).
     register_mock_transfer_fails(0);
-    assert_eq!(
-        vault.create_alpha_vault(1_000, 1),
-        Err(Error::StakeTransferFailed)
-    );
+    assert_eq!(vault.create_alpha_vault(1_000, 1), Err(Error::StakeTransferFailed));
     assert_eq!(vault.get_vaults_count(accounts.alice), 0);
     assert_eq!(vault.get_total_vaults_count(), 0);
 }
@@ -369,20 +361,8 @@ fn race_two_users_credited_only_their_own_amount() {
     set_caller(accounts.bob);
     let bob_vault = vault.create_alpha_vault(1_000, 1).unwrap();
 
-    assert_eq!(
-        vault
-            .get_vault(accounts.alice, alice_vault)
-            .unwrap()
-            .collateral_balance,
-        1_000
-    );
-    assert_eq!(
-        vault
-            .get_vault(accounts.bob, bob_vault)
-            .unwrap()
-            .collateral_balance,
-        1_000
-    );
+    assert_eq!(vault.get_vault(accounts.alice, alice_vault).unwrap().collateral_balance, 1_000);
+    assert_eq!(vault.get_vault(accounts.bob, bob_vault).unwrap().collateral_balance, 1_000);
 }
 
 #[ink::test]
@@ -403,10 +383,7 @@ fn add_alpha_collateral_rejects_zero_amount() {
     let vault_id = create_test_vault(&mut vault, accounts.alice, 10_000_000);
 
     set_caller(accounts.alice);
-    assert_eq!(
-        vault.add_alpha_collateral(vault_id, 0),
-        Err(Error::InsufficientCollateral)
-    );
+    assert_eq!(vault.add_alpha_collateral(vault_id, 0), Err(Error::InsufficientCollateral));
 }
 
 #[ink::test]
@@ -416,10 +393,7 @@ fn add_alpha_collateral_pull_failure_leaves_vault_unchanged() {
 
     register_mock_transfer_fails(10_000_000);
     set_caller(accounts.alice);
-    assert_eq!(
-        vault.add_alpha_collateral(vault_id, 5_000_000),
-        Err(Error::StakeTransferFailed)
-    );
+    assert_eq!(vault.add_alpha_collateral(vault_id, 5_000_000), Err(Error::StakeTransferFailed));
 
     let stored = vault.get_vault(accounts.alice, vault_id).unwrap();
     assert_eq!(stored.collateral_balance, 10_000_000);
@@ -565,9 +539,7 @@ fn max_borrow_allowed_spec_example() {
     let value = TusdtVaultAlpha::collateral_value(price, 1_000_000_000_000).unwrap();
     assert_eq!(value, 75_455_400_000);
 
-    let max_borrow = vault
-        .max_borrow_allowed(1, price, 1_000_000_000_000)
-        .unwrap();
+    let max_borrow = vault.max_borrow_allowed(1, price, 1_000_000_000_000).unwrap();
     assert_eq!(max_borrow, 15_091_080_000);
 }
 
@@ -591,12 +563,8 @@ fn max_borrow_allowed_uses_per_netuid_ratio() {
     let alpha_to_tao = TusdtVaultAlpha::alpha_price_rao_to_ratio(377_277).unwrap();
     let price = Ratio::from_integer(200).checked_mul(alpha_to_tao).unwrap();
 
-    let max_default = vault
-        .max_borrow_allowed(1, price, 1_000_000_000_000)
-        .unwrap();
-    let max_custom = vault
-        .max_borrow_allowed(2, price, 1_000_000_000_000)
-        .unwrap();
+    let max_default = vault.max_borrow_allowed(1, price, 1_000_000_000_000).unwrap();
+    let max_custom = vault.max_borrow_allowed(2, price, 1_000_000_000_000).unwrap();
     assert_eq!(max_default, 50_303_600_000); // 75.4554 / 1.5
     assert_eq!(max_custom, 15_091_080_000); // 75.4554 / 5
 }
@@ -679,10 +647,7 @@ fn global_params_defaults() {
 fn set_global_params_rejects_non_governance() {
     let (mut vault, accounts) = setup();
     set_caller(accounts.bob);
-    assert_eq!(
-        vault.set_global_params(default_global_config()),
-        Err(Error::NotGovernance)
-    );
+    assert_eq!(vault.set_global_params(default_global_config()), Err(Error::NotGovernance));
 }
 
 #[ink::test]
@@ -723,10 +688,7 @@ fn execute_global_params_after_timelock_applies() {
 #[ink::test]
 fn execute_global_params_without_pending_fails() {
     let (mut vault, _accounts) = setup();
-    assert_eq!(
-        vault.execute_global_params_update(),
-        Err(Error::NoPendingContractParamsUpdate)
-    );
+    assert_eq!(vault.execute_global_params_update(), Err(Error::NoPendingContractParamsUpdate));
 }
 
 #[ink::test]
@@ -736,10 +698,7 @@ fn cancel_global_params_update_rejects_non_governance() {
     vault.set_global_params(default_global_config()).unwrap();
 
     set_caller(accounts.bob);
-    assert_eq!(
-        vault.cancel_global_params_update(),
-        Err(Error::NotGovernance)
-    );
+    assert_eq!(vault.cancel_global_params_update(), Err(Error::NotGovernance));
 }
 
 #[ink::test]
@@ -751,20 +710,14 @@ fn cancel_global_params_update_works() {
 
     // Nothing pending anymore — execute fails even after the timelock.
     set_time(24 * 60 * 60 * 1_000 + 1);
-    assert_eq!(
-        vault.execute_global_params_update(),
-        Err(Error::NoPendingContractParamsUpdate)
-    );
+    assert_eq!(vault.execute_global_params_update(), Err(Error::NoPendingContractParamsUpdate));
 }
 
 #[ink::test]
 fn cancel_global_params_update_without_pending_fails() {
     let (mut vault, accounts) = setup();
     set_caller(accounts.alice);
-    assert_eq!(
-        vault.cancel_global_params_update(),
-        Err(Error::NoPendingContractParamsUpdate)
-    );
+    assert_eq!(vault.cancel_global_params_update(), Err(Error::NoPendingContractParamsUpdate));
 }
 
 #[ink::test]
@@ -782,10 +735,7 @@ fn set_global_params_rejects_short_auction_duration() {
     set_caller(accounts.alice);
     let mut config = default_global_config();
     config.auction_duration_ms = 59_999;
-    assert_eq!(
-        vault.set_global_params(config),
-        Err(Error::InvalidAuctionDuration)
-    );
+    assert_eq!(vault.set_global_params(config), Err(Error::InvalidAuctionDuration));
 }
 
 #[ink::test]
@@ -794,10 +744,7 @@ fn set_global_params_rejects_long_auction_duration() {
     set_caller(accounts.alice);
     let mut config = default_global_config();
     config.auction_duration_ms = 7 * 24 * 60 * 60 * 1_000 + 1;
-    assert_eq!(
-        vault.set_global_params(config),
-        Err(Error::InvalidAuctionDuration)
-    );
+    assert_eq!(vault.set_global_params(config), Err(Error::InvalidAuctionDuration));
 }
 
 #[ink::test]
@@ -806,10 +753,7 @@ fn set_global_params_rejects_zero_oracle_age() {
     set_caller(accounts.alice);
     let mut config = default_global_config();
     config.max_oracle_age_ms = 0;
-    assert_eq!(
-        vault.set_global_params(config),
-        Err(Error::InvalidOracleMaxAge)
-    );
+    assert_eq!(vault.set_global_params(config), Err(Error::InvalidOracleMaxAge));
 }
 
 #[ink::test]
@@ -962,4 +906,3 @@ fn liquidation_counter_setter_getter_roundtrip() {
     vault.set_active_liquidation_count_for_test(0);
     assert_eq!(vault.get_active_liquidation_count(), 0);
 }
-

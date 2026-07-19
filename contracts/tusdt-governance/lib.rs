@@ -19,7 +19,9 @@ mod governance {
     use tusdt_oracle::{PriceData, TusdtOracleRef};
     use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
-    use tusdt_vault_alpha::{TusdtVaultAlphaRef, VaultContractParamsConfig, VaultGlobalParamsConfig};
+    use tusdt_vault_alpha::{
+        TusdtVaultAlphaRef, VaultContractParamsConfig, VaultGlobalParamsConfig,
+    };
 
     // Cross-contract forwarders that let governance drive the vault, auction, and oracle.
     // `forward_*` helpers defined here.
@@ -88,12 +90,7 @@ mod governance {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub enum ProposalKind {
-        Funding {
-            fund: Fund,
-            token_kind: TokenKind,
-            amount: Balance,
-            recipient: AccountId,
-        },
+        Funding { fund: Fund, token_kind: TokenKind, amount: Balance, recipient: AccountId },
         NonFunding,
     }
 
@@ -450,10 +447,7 @@ mod governance {
             self.ensure_election()?;
             let previous = self.maintainer;
             self.maintainer = new_maintainer;
-            self.env().emit_event(MaintainerChanged {
-                previous,
-                new: new_maintainer,
-            });
+            self.env().emit_event(MaintainerChanged { previous, new: new_maintainer });
             Ok(())
         }
 
@@ -474,10 +468,7 @@ mod governance {
             self.ensure_maintainer()?;
             let old_vault = self.vault.to_account_id();
             self.vault = TusdtVaultAlphaRef::from_account_id(new_vault);
-            self.env().emit_event(VaultAddressUpdated {
-                old_vault,
-                new_vault,
-            });
+            self.env().emit_event(VaultAddressUpdated { old_vault, new_vault });
             Ok(())
         }
 
@@ -487,10 +478,7 @@ mod governance {
             self.ensure_maintainer()?;
             let old_auction = self.auction.to_account_id();
             self.auction = TusdtAuctionRef::from_account_id(new_auction);
-            self.env().emit_event(GovernanceAuctionUpdated {
-                old_auction,
-                new_auction,
-            });
+            self.env().emit_event(GovernanceAuctionUpdated { old_auction, new_auction });
             Ok(())
         }
 
@@ -500,10 +488,7 @@ mod governance {
             self.ensure_maintainer()?;
             let old_oracle = self.oracle.to_account_id();
             self.oracle = TusdtOracleRef::from_account_id(new_oracle);
-            self.env().emit_event(GovernanceOracleUpdated {
-                old_oracle,
-                new_oracle,
-            });
+            self.env().emit_event(GovernanceOracleUpdated { old_oracle, new_oracle });
             Ok(())
         }
 
@@ -513,10 +498,7 @@ mod governance {
             self.ensure_maintainer()?;
             let old_treasury = self.treasury.to_account_id();
             self.treasury = TusdtTreasuryRef::from_account_id(new_treasury);
-            self.env().emit_event(GovernanceTreasuryUpdated {
-                old_treasury,
-                new_treasury,
-            });
+            self.env().emit_event(GovernanceTreasuryUpdated { old_treasury, new_treasury });
             Ok(())
         }
 
@@ -530,11 +512,7 @@ mod governance {
             }
             // Reject duplicates so the committee really has COUNCIL_SIZE distinct members.
             for (i, m) in members.iter().enumerate() {
-                if members
-                    .iter()
-                    .skip(i.saturating_add(1))
-                    .any(|other| other == m)
-                {
+                if members.iter().skip(i.saturating_add(1)).any(|other| other == m) {
                     return Err(Error::InvalidCouncil);
                 }
             }
@@ -611,11 +589,7 @@ mod governance {
 
         /// Migrates the vault's staking hotkey to a new address. Maintainer-only.
         #[ink(message)]
-        pub fn vault_set_hotkey(
-            &mut self,
-            new_hotkey: AccountId,
-            netuids: Vec<u16>,
-        ) -> Result<()> {
+        pub fn vault_set_hotkey(&mut self, new_hotkey: AccountId, netuids: Vec<u16>) -> Result<()> {
             self.forward_vault_set_hotkey(new_hotkey, netuids)
         }
 
@@ -734,18 +708,8 @@ mod governance {
             snapshot_block: u32,
         ) -> Result<u64> {
             self.ensure_council()?;
-            let epoch = self
-                .current_epoch
-                .checked_add(1)
-                .ok_or(Error::ArithmeticError)?;
-            self.snapshots.insert(
-                epoch,
-                &Snapshot {
-                    root,
-                    circulating_supply,
-                    snapshot_block,
-                },
-            );
+            let epoch = self.current_epoch.checked_add(1).ok_or(Error::ArithmeticError)?;
+            self.snapshots.insert(epoch, &Snapshot { root, circulating_supply, snapshot_block });
             self.current_epoch = epoch;
             self.env().emit_event(SnapshotSubmitted {
                 epoch,
@@ -818,11 +782,7 @@ mod governance {
         /// Submits a new proposal. Only council members may submit. Proposals are
         /// accepted during the configured day-of-month window (UTC, inclusive).
         #[ink(message)]
-        pub fn submit_proposal(
-            &mut self,
-            cid: String,
-            kind: ProposalKind,
-        ) -> Result<u64> {
+        pub fn submit_proposal(&mut self, cid: String, kind: ProposalKind) -> Result<u64> {
             // Only council members may submit proposals.
             self.ensure_council()?;
 
@@ -851,13 +811,9 @@ mod governance {
 
             let proposer = self.env().caller();
 
-            let id = self
-                .proposal_count
-                .checked_add(1)
-                .ok_or(Error::ArithmeticError)?;
-            let voting_ends_at = now
-                .checked_add(self.params.voting_period_ms)
-                .ok_or(Error::ArithmeticError)?;
+            let id = self.proposal_count.checked_add(1).ok_or(Error::ArithmeticError)?;
+            let voting_ends_at =
+                now.checked_add(self.params.voting_period_ms).ok_or(Error::ArithmeticError)?;
 
             let proposal = Proposal {
                 id,
@@ -875,11 +831,7 @@ mod governance {
             self.proposals.insert(id, &proposal);
             self.proposal_count = id;
 
-            self.env().emit_event(ProposalSubmitted {
-                proposal_id: id,
-                proposer,
-                voting_ends_at,
-            });
+            self.env().emit_event(ProposalSubmitted { proposal_id: id, proposer, voting_ends_at });
 
             Ok(id)
         }
@@ -899,10 +851,7 @@ mod governance {
             multiplier_bps: u32,
             proof: Vec<MerkleHash>,
         ) -> Result<()> {
-            let mut proposal = self
-                .proposals
-                .get(proposal_id)
-                .ok_or(Error::ProposalNotFound)?;
+            let mut proposal = self.proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
             if proposal.status != ProposalStatus::Active {
                 return Err(Error::ProposalNotActive);
             }
@@ -918,10 +867,7 @@ mod governance {
             }
 
             // Verify the caller's leaf against the snapshot the proposal is bound to.
-            let snapshot = self
-                .snapshots
-                .get(proposal.snapshot_epoch)
-                .ok_or(Error::NoSnapshot)?;
+            let snapshot = self.snapshots.get(proposal.snapshot_epoch).ok_or(Error::NoSnapshot)?;
             let leaf = leaf_hash(coldkey, hotkey, balance, multiplier_bps);
             if !verify_merkle_proof(&proof, snapshot.root, leaf) {
                 return Err(Error::InvalidProof);
@@ -933,41 +879,24 @@ mod governance {
             }
 
             if support {
-                proposal.yes = proposal
-                    .yes
-                    .checked_add(weight)
-                    .ok_or(Error::ArithmeticError)?;
+                proposal.yes = proposal.yes.checked_add(weight).ok_or(Error::ArithmeticError)?;
             } else {
-                proposal.no = proposal
-                    .no
-                    .checked_add(weight)
-                    .ok_or(Error::ArithmeticError)?;
+                proposal.no = proposal.no.checked_add(weight).ok_or(Error::ArithmeticError)?;
             }
             // Track raw balance participation for the quorum (in circulating-supply units).
-            proposal.voted_balance = proposal
-                .voted_balance
-                .checked_add(balance)
-                .ok_or(Error::ArithmeticError)?;
+            proposal.voted_balance =
+                proposal.voted_balance.checked_add(balance).ok_or(Error::ArithmeticError)?;
             self.proposals.insert(proposal_id, &proposal);
             self.has_voted.insert(key, &());
 
-            self.env().emit_event(Voted {
-                proposal_id,
-                coldkey,
-                hotkey,
-                support,
-                weight,
-            });
+            self.env().emit_event(Voted { proposal_id, coldkey, hotkey, support, weight });
             Ok(())
         }
 
         /// Closes voting and decides the outcome. Permissionless; only callable after `voting_ends_at`.
         #[ink(message)]
         pub fn finalize(&mut self, proposal_id: u64) -> Result<()> {
-            let mut proposal = self
-                .proposals
-                .get(proposal_id)
-                .ok_or(Error::ProposalNotFound)?;
+            let mut proposal = self.proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
             if proposal.status != ProposalStatus::Active {
                 return Err(Error::ProposalNotActive);
             }
@@ -978,10 +907,7 @@ mod governance {
 
             // Quorum is measured by raw balance that voted (same units as circulating supply);
             // the approval ratio is weighted by voting power (yes / (yes + no)).
-            let total = proposal
-                .yes
-                .checked_add(proposal.no)
-                .ok_or(Error::ArithmeticError)?;
+            let total = proposal.yes.checked_add(proposal.no).ok_or(Error::ArithmeticError)?;
             let quorum_met = proposal.voted_balance >= self.quorum(proposal.snapshot_epoch);
             let new_status = if !quorum_met || total == 0 {
                 ProposalStatus::Rejected
@@ -1003,34 +929,22 @@ mod governance {
             let no = proposal.no;
             self.proposals.insert(proposal_id, &proposal);
 
-            self.env().emit_event(ProposalFinalized {
-                proposal_id,
-                status: new_status,
-                yes,
-                no,
-            });
+            self.env().emit_event(ProposalFinalized { proposal_id, status: new_status, yes, no });
             Ok(())
         }
 
         /// Executes a passed proposal. For Funding, calls `treasury.release(...)`. Permissionless.
         #[ink(message)]
         pub fn execute(&mut self, proposal_id: u64) -> Result<()> {
-            let mut proposal = self
-                .proposals
-                .get(proposal_id)
-                .ok_or(Error::ProposalNotFound)?;
+            let mut proposal = self.proposals.get(proposal_id).ok_or(Error::ProposalNotFound)?;
             match proposal.status {
-                ProposalStatus::Passed => {}
+                ProposalStatus::Passed => {},
                 ProposalStatus::Executed => return Err(Error::AlreadyExecuted),
                 _ => return Err(Error::NotPassed),
             }
 
-            if let ProposalKind::Funding {
-                fund,
-                token_kind,
-                amount,
-                recipient,
-            } = proposal.kind.clone()
+            if let ProposalKind::Funding { fund, token_kind, amount, recipient } =
+                proposal.kind.clone()
             {
                 self.treasury
                     .release(fund, token_kind, amount, recipient)
