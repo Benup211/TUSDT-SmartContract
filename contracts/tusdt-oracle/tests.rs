@@ -23,19 +23,13 @@ fn account_from_seed(seed: u32) -> ink::primitives::AccountId {
 }
 
 fn metadata_for(reporter: ink::primitives::AccountId) -> PriceSubmissionMetadata {
-    PriceSubmissionMetadata {
-        hot_key: reporter,
-        provider: None,
-    }
+    PriceSubmissionMetadata { hot_key: reporter, provider: None }
 }
 
 /// Helper: submit a price with default metadata (hot_key = caller, no provider).
 fn submit_price(oracle: &mut TusdtOracle, reporter: ink::primitives::AccountId, price: u128) {
     set_caller(reporter);
-    assert_eq!(
-        oracle.submit_price(Ratio::from_integer(price), metadata_for(reporter)),
-        Ok(())
-    );
+    assert_eq!(oracle.submit_price(Ratio::from_integer(price), metadata_for(reporter)), Ok(()));
 }
 
 /// Helper: submit a price with custom metadata.
@@ -46,10 +40,7 @@ fn submit_price_with_metadata(
     metadata: PriceSubmissionMetadata,
 ) {
     set_caller(reporter);
-    assert_eq!(
-        oracle.submit_price(Ratio::from_integer(price), metadata),
-        Ok(())
-    );
+    assert_eq!(oracle.submit_price(Ratio::from_integer(price), metadata), Ok(()));
 }
 
 // ---------------------------------------------------------------------------
@@ -228,9 +219,8 @@ fn override_allows_commit_without_submissions() {
 
     set_time(55);
     set_caller(accounts.bob);
-    let committed = oracle
-        .commit_round(Some(Ratio::from_integer(42)))
-        .expect("override commit should succeed");
+    let committed =
+        oracle.commit_round(Some(Ratio::from_integer(42))).expect("override commit should succeed");
 
     assert_eq!(
         committed,
@@ -259,9 +249,8 @@ fn override_bypasses_quorum_and_keeps_available_median() {
 
     set_time(88);
     set_caller(accounts.charlie);
-    let committed = oracle
-        .commit_round(Some(Ratio::from_integer(25)))
-        .expect("override commit should succeed");
+    let committed =
+        oracle.commit_round(Some(Ratio::from_integer(25))).expect("override commit should succeed");
 
     assert_eq!(
         committed,
@@ -313,21 +302,20 @@ fn median_is_used_for_five_submissions() {
     let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     register_stake(true);
-    for reporter in [
-        accounts.bob,
-        accounts.charlie,
-        accounts.django,
-        accounts.eve,
-        accounts.frank,
-    ] {
-        submit_price(&mut oracle, reporter, match reporter {
-            r if r == accounts.bob => 50,
-            r if r == accounts.charlie => 10,
-            r if r == accounts.django => 30,
-            r if r == accounts.eve => 20,
-            r if r == accounts.frank => 40,
-            _ => 0,
-        });
+    for reporter in [accounts.bob, accounts.charlie, accounts.django, accounts.eve, accounts.frank]
+    {
+        submit_price(
+            &mut oracle,
+            reporter,
+            match reporter {
+                r if r == accounts.bob => 50,
+                r if r == accounts.charlie => 10,
+                r if r == accounts.django => 30,
+                r if r == accounts.eve => 20,
+                r if r == accounts.frank => 40,
+                _ => 0,
+            },
+        );
     }
 
     assert_eq!(
@@ -397,9 +385,8 @@ fn manual_override_is_stored_while_preserving_median_metadata() {
 
     set_time(99);
     set_caller(accounts.eve);
-    let committed = oracle
-        .commit_round(Some(Ratio::from_integer(99)))
-        .expect("override commit should succeed");
+    let committed =
+        oracle.commit_round(Some(Ratio::from_integer(99))).expect("override commit should succeed");
 
     assert_eq!(
         committed,
@@ -435,11 +422,7 @@ fn commit_advances_the_round() {
     assert_eq!(oracle.current_round_id(), 1);
     assert_eq!(
         oracle.get_current_round_summary(),
-        RoundSummary {
-            round_id: 1,
-            reporter_count: 0,
-            median_price: None,
-        }
+        RoundSummary { round_id: 1, reporter_count: 0, median_price: None }
     );
 }
 
@@ -453,10 +436,7 @@ fn governance_sets_validator() {
     assert_eq!(oracle.validator(), Some(accounts.charlie));
 
     set_caller(accounts.eve);
-    assert_eq!(
-        oracle.set_validator(Some(accounts.eve)),
-        Err(Error::NotGovernance)
-    );
+    assert_eq!(oracle.set_validator(Some(accounts.eve)), Err(Error::NotGovernance));
 }
 
 #[ink::test]
@@ -466,10 +446,7 @@ fn controller_updates_oracle_governance() {
     let mut oracle = TusdtOracle::new(accounts.alice, accounts.bob, 113);
 
     set_caller(accounts.bob);
-    assert_eq!(
-        oracle.update_governance(accounts.charlie),
-        Err(Error::NotController)
-    );
+    assert_eq!(oracle.update_governance(accounts.charlie), Err(Error::NotController));
 
     set_caller(accounts.alice);
     assert_eq!(oracle.update_governance(accounts.charlie), Ok(()));
@@ -483,10 +460,7 @@ fn controller_updates_oracle_governance() {
     );
 
     set_caller(accounts.charlie);
-    assert_eq!(
-        oracle.set_max_price_deviation(Ratio::from_basis_points(1_000)),
-        Ok(())
-    );
+    assert_eq!(oracle.set_max_price_deviation(Ratio::from_basis_points(1_000)), Ok(()));
 }
 
 #[ink::test]
@@ -551,10 +525,7 @@ fn round_submissions_include_metadata() {
         &mut oracle,
         accounts.bob,
         12,
-        PriceSubmissionMetadata {
-            hot_key: accounts.eve,
-            provider: None,
-        },
+        PriceSubmissionMetadata { hot_key: accounts.eve, provider: None },
     );
     register_stake(true);
     submit_price(&mut oracle, accounts.charlie, 15);
@@ -565,10 +536,7 @@ fn round_submissions_include_metadata() {
             PriceSubmission {
                 reporter: accounts.bob,
                 price: Ratio::from_integer(12),
-                metadata: PriceSubmissionMetadata {
-                    hot_key: accounts.eve,
-                    provider: None,
-                },
+                metadata: PriceSubmissionMetadata { hot_key: accounts.eve, provider: None },
             },
             PriceSubmission {
                 reporter: accounts.charlie,
@@ -596,21 +564,12 @@ fn round_submission_count_is_bounded() {
     register_stake(true);
     set_caller(overflow_reporter);
     assert_eq!(
-        oracle.submit_price(
-            Ratio::from_integer(999),
-            metadata_for(overflow_reporter)
-        ),
+        oracle.submit_price(Ratio::from_integer(999), metadata_for(overflow_reporter)),
         Err(Error::MaxSubmissionsReached)
     );
 
-    assert_eq!(
-        oracle.get_current_round_summary().reporter_count,
-        max_submissions
-    );
-    assert_eq!(
-        oracle.get_round_submissions(0).len(),
-        max_submissions as usize
-    );
+    assert_eq!(oracle.get_current_round_summary().reporter_count, max_submissions);
+    assert_eq!(oracle.get_round_submissions(0).len(), max_submissions as usize);
 }
 
 #[ink::test]
@@ -632,9 +591,7 @@ fn validator_commit_within_deviation_succeeds() {
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
-    oracle
-        .commit_round(Some(Ratio::from_integer(100)))
-        .expect("first commit should succeed");
+    oracle.commit_round(Some(Ratio::from_integer(100))).expect("first commit should succeed");
     // 5% default deviation: 104 is within 95..=105.
     assert!(oracle.commit_round(Some(Ratio::from_integer(104))).is_ok());
 }
@@ -647,9 +604,7 @@ fn validator_commit_outside_deviation_is_rejected() {
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
-    oracle
-        .commit_round(Some(Ratio::from_integer(100)))
-        .expect("first commit should succeed");
+    oracle.commit_round(Some(Ratio::from_integer(100))).expect("first commit should succeed");
     assert_eq!(
         oracle.commit_round(Some(Ratio::from_integer(130))),
         Err(Error::PriceDeviationExceeded)
@@ -664,9 +619,7 @@ fn median_commit_outside_deviation_is_rejected() {
     assert_eq!(oracle.set_validator(Some(accounts.eve)), Ok(()));
 
     set_caller(accounts.eve);
-    oracle
-        .commit_round(Some(Ratio::from_integer(100)))
-        .expect("first commit should succeed");
+    oracle.commit_round(Some(Ratio::from_integer(100))).expect("first commit should succeed");
 
     register_stake(true);
     submit_price(&mut oracle, accounts.bob, 200);
@@ -676,10 +629,7 @@ fn median_commit_outside_deviation_is_rejected() {
     submit_price(&mut oracle, accounts.django, 220);
 
     set_caller(accounts.eve);
-    assert_eq!(
-        oracle.commit_round(None),
-        Err(Error::PriceDeviationExceeded)
-    );
+    assert_eq!(oracle.commit_round(None), Err(Error::PriceDeviationExceeded));
 }
 
 #[ink::test]
@@ -690,9 +640,7 @@ fn governance_commit_bypasses_deviation_and_quorum() {
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
-    oracle
-        .commit_round(Some(Ratio::from_integer(100)))
-        .expect("first commit should succeed");
+    oracle.commit_round(Some(Ratio::from_integer(100))).expect("first commit should succeed");
     assert_eq!(
         oracle.commit_round(Some(Ratio::from_integer(500))),
         Err(Error::PriceDeviationExceeded)
@@ -715,10 +663,7 @@ fn governance_commit_rejects_zero_price() {
     set_caller(accounts.alice);
     let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
-    assert_eq!(
-        oracle.commit_round_governance(Ratio::from_integer(0)),
-        Err(Error::InvalidPrice)
-    );
+    assert_eq!(oracle.commit_round_governance(Ratio::from_integer(0)), Err(Error::InvalidPrice));
 }
 
 #[ink::test]
@@ -728,10 +673,7 @@ fn governance_commit_requires_governance_caller() {
     let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     set_caller(accounts.bob);
-    assert_eq!(
-        oracle.commit_round_governance(Ratio::from_integer(10)),
-        Err(Error::NotGovernance)
-    );
+    assert_eq!(oracle.commit_round_governance(Ratio::from_integer(10)), Err(Error::NotGovernance));
 }
 
 #[ink::test]
@@ -742,9 +684,7 @@ fn governance_can_widen_deviation_threshold() {
     assert_eq!(oracle.set_validator(Some(accounts.bob)), Ok(()));
 
     set_caller(accounts.bob);
-    oracle
-        .commit_round(Some(Ratio::from_integer(100)))
-        .expect("first commit should succeed");
+    oracle.commit_round(Some(Ratio::from_integer(100))).expect("first commit should succeed");
     assert_eq!(
         oracle.commit_round(Some(Ratio::from_integer(130))),
         Err(Error::PriceDeviationExceeded)
@@ -752,14 +692,8 @@ fn governance_can_widen_deviation_threshold() {
 
     set_caller(accounts.alice);
     // Allow up to 50% deviation.
-    assert_eq!(
-        oracle.set_max_price_deviation(Ratio::from_basis_points(5_000)),
-        Ok(())
-    );
-    assert_eq!(
-        oracle.max_price_deviation(),
-        Ratio::from_basis_points(5_000)
-    );
+    assert_eq!(oracle.set_max_price_deviation(Ratio::from_basis_points(5_000)), Ok(()));
+    assert_eq!(oracle.max_price_deviation(), Ratio::from_basis_points(5_000));
 
     set_caller(accounts.bob);
     assert!(oracle.commit_round(Some(Ratio::from_integer(130))).is_ok());
@@ -794,10 +728,7 @@ fn invalid_hotkey_rejected() {
     assert_eq!(
         oracle.submit_price(
             Ratio::from_integer(10),
-            PriceSubmissionMetadata {
-                hot_key: zero_hotkey,
-                provider: None,
-            }
+            PriceSubmissionMetadata { hot_key: zero_hotkey, provider: None }
         ),
         Err(Error::InvalidHotkey)
     );
@@ -854,10 +785,8 @@ fn provider_field_persisted() {
     let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
     register_stake(true);
-    let metadata = PriceSubmissionMetadata {
-        hot_key: accounts.bob,
-        provider: Some(b"coingecko".to_vec()),
-    };
+    let metadata =
+        PriceSubmissionMetadata { hot_key: accounts.bob, provider: Some(b"coingecko".to_vec()) };
     submit_price_with_metadata(&mut oracle, accounts.bob, 100, metadata);
 
     let submissions = oracle.get_round_submissions(0);
@@ -865,10 +794,7 @@ fn provider_field_persisted() {
     assert_eq!(submissions[0].reporter, accounts.bob);
     assert_eq!(submissions[0].price, Ratio::from_integer(100));
     assert_eq!(submissions[0].metadata.hot_key, accounts.bob);
-    assert_eq!(
-        submissions[0].metadata.provider,
-        Some(b"coingecko".to_vec())
-    );
+    assert_eq!(submissions[0].metadata.provider, Some(b"coingecko".to_vec()));
 }
 
 #[ink::test]
@@ -919,10 +845,7 @@ fn set_min_submitter_stake_and_get() {
     set_caller(accounts.alice);
     let mut oracle = TusdtOracle::new(accounts.alice, accounts.alice, 113);
 
-    assert_eq!(
-        oracle.min_submitter_stake(),
-        10_000_000_000
-    );
+    assert_eq!(oracle.min_submitter_stake(), 10_000_000_000);
     assert_eq!(oracle.set_min_submitter_stake(500_000_000_000), Ok(()));
     assert_eq!(oracle.min_submitter_stake(), 500_000_000_000);
 }
@@ -935,10 +858,7 @@ fn set_min_submitter_stake_requires_governance() {
 
     // alice is the controller, not governance; bob is governance.
     set_caller(accounts.alice);
-    assert_eq!(
-        oracle.set_min_submitter_stake(100),
-        Err(Error::NotGovernance)
-    );
+    assert_eq!(oracle.set_min_submitter_stake(100), Err(Error::NotGovernance));
 
     set_caller(accounts.bob);
     assert_eq!(oracle.set_min_submitter_stake(100), Ok(()));

@@ -145,11 +145,7 @@ mod tusdt {
         #[inline]
         fn set_allowance(&mut self, owner: AccountId, spender: AccountId, value: Balance) {
             self.allowances.insert((&owner, &spender), &value);
-            self.env().emit_event(Approval {
-                owner,
-                spender,
-                value,
-            });
+            self.env().emit_event(Approval { owner, spender, value });
         }
 
         /// Reverts with `NotController` if the caller is not the configured controller.
@@ -183,22 +179,11 @@ mod tusdt {
             self.ensure_minter()?;
             let to_balance = self.balance_of_impl(&to);
 
-            self.total_supply = self
-                .total_supply
-                .checked_add(value)
-                .ok_or(Error::ArithmeticError)?;
-            self.balances.insert(
-                to,
-                &to_balance
-                    .checked_add(value)
-                    .ok_or(Error::ArithmeticError)?,
-            );
+            self.total_supply =
+                self.total_supply.checked_add(value).ok_or(Error::ArithmeticError)?;
+            self.balances.insert(to, &to_balance.checked_add(value).ok_or(Error::ArithmeticError)?);
 
-            self.env().emit_event(Transfer {
-                from: None,
-                to: Some(to),
-                value,
-            });
+            self.env().emit_event(Transfer { from: None, to: Some(to), value });
             Ok(())
         }
 
@@ -214,16 +199,10 @@ mod tusdt {
             #[allow(clippy::arithmetic_side_effects)]
             self.balances.insert(from, &(from_balance - value));
 
-            self.total_supply = self
-                .total_supply
-                .checked_sub(value)
-                .ok_or(Error::ArithmeticError)?;
+            self.total_supply =
+                self.total_supply.checked_sub(value).ok_or(Error::ArithmeticError)?;
 
-            self.env().emit_event(Transfer {
-                from: Some(from),
-                to: None,
-                value,
-            });
+            self.env().emit_event(Transfer { from: Some(from), to: None, value });
             Ok(())
         }
 
@@ -258,9 +237,8 @@ mod tusdt {
         ) -> Result<()> {
             let owner = self.env().caller();
             let allowance = self.allowance_impl(&owner, &spender);
-            let updated_allowance = allowance
-                .checked_sub(delta_value)
-                .ok_or(Error::InsufficientAllowance)?;
+            let updated_allowance =
+                allowance.checked_sub(delta_value).ok_or(Error::InsufficientAllowance)?;
             self.set_allowance(owner, spender, updated_allowance);
             Ok(())
         }
@@ -281,8 +259,7 @@ mod tusdt {
             self.transfer_from_to(&from, &to, value)?;
             // We checked that allowance >= value
             #[allow(clippy::arithmetic_side_effects)]
-            self.allowances
-                .insert((&from, &caller), &(allowance - value));
+            self.allowances.insert((&from, &caller), &(allowance - value));
             Ok(())
         }
 
@@ -301,17 +278,8 @@ mod tusdt {
             #[allow(clippy::arithmetic_side_effects)]
             self.balances.insert(from, &(from_balance - value));
             let to_balance = self.balance_of_impl(to);
-            self.balances.insert(
-                to,
-                &to_balance
-                    .checked_add(value)
-                    .ok_or(Error::ArithmeticError)?,
-            );
-            self.env().emit_event(Transfer {
-                from: Some(*from),
-                to: Some(*to),
-                value,
-            });
+            self.balances.insert(to, &to_balance.checked_add(value).ok_or(Error::ArithmeticError)?);
+            self.env().emit_event(Transfer { from: Some(*from), to: Some(*to), value });
             Ok(())
         }
     }

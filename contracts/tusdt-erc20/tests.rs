@@ -59,10 +59,7 @@ fn invalid_transfer_should_fail() {
 
     set_caller(accounts.bob);
 
-    assert_eq!(
-        erc20.transfer(accounts.eve, 10),
-        Err(Error::InsufficientBalance)
-    );
+    assert_eq!(erc20.transfer(accounts.eve, 10), Err(Error::InsufficientBalance));
     assert_eq!(erc20.balance_of(accounts.alice), 100);
     assert_eq!(erc20.balance_of(accounts.bob), 0);
     assert_eq!(erc20.balance_of(accounts.eve), 0);
@@ -82,10 +79,7 @@ fn transfer_from_works() {
 
     set_caller(accounts.bob);
 
-    assert_eq!(
-        erc20.transfer_from(accounts.alice, accounts.eve, 10),
-        Ok(())
-    );
+    assert_eq!(erc20.transfer_from(accounts.alice, accounts.eve, 10), Ok(()));
     assert_eq!(erc20.balance_of(accounts.eve), 10);
     assert_eq!(erc20.allowance(accounts.alice, accounts.bob), 0);
 }
@@ -106,10 +100,7 @@ fn allowance_must_not_change_on_failed_transfer() {
         erc20.transfer_from(accounts.alice, accounts.eve, alice_balance + 1),
         Err(Error::InsufficientBalance)
     );
-    assert_eq!(
-        erc20.allowance(accounts.alice, accounts.bob),
-        initial_allowance
-    );
+    assert_eq!(erc20.allowance(accounts.alice, accounts.bob), initial_allowance);
 }
 
 #[ink::test]
@@ -154,10 +145,7 @@ fn burn_fails_on_insufficient_balance() {
     let mut erc20 = TusdtErc20::new(accounts.alice);
     assert_eq!(erc20.mint(accounts.bob, 50), Ok(()));
 
-    assert_eq!(
-        erc20.burn(accounts.bob, 60),
-        Err(Error::InsufficientBalance)
-    );
+    assert_eq!(erc20.burn(accounts.bob, 60), Err(Error::InsufficientBalance));
     assert_eq!(erc20.total_supply(), 50);
     assert_eq!(erc20.balance_of(accounts.bob), 50);
 }
@@ -211,10 +199,7 @@ fn decrease_allowance_fails_when_delta_exceeds_allowance() {
     let mut erc20 = TusdtErc20::new(accounts.alice);
 
     assert_eq!(erc20.approve(accounts.bob, 3), Ok(()));
-    assert_eq!(
-        erc20.decrease_allowance(accounts.bob, 4),
-        Err(Error::InsufficientAllowance)
-    );
+    assert_eq!(erc20.decrease_allowance(accounts.bob, 4), Err(Error::InsufficientAllowance));
     assert_eq!(erc20.allowance(accounts.alice, accounts.bob), 3);
 }
 
@@ -227,10 +212,7 @@ fn transfer_from_partially_consumes_allowance() {
 
     set_caller(accounts.bob);
 
-    assert_eq!(
-        erc20.transfer_from(accounts.alice, accounts.eve, 10),
-        Ok(())
-    );
+    assert_eq!(erc20.transfer_from(accounts.alice, accounts.eve, 10), Ok(()));
     assert_eq!(erc20.allowance(accounts.alice, accounts.bob), 20);
     assert_eq!(erc20.balance_of(accounts.eve), 10);
 }

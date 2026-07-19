@@ -164,10 +164,7 @@ mod treasury {
             self.ensure_governance()?;
             let previous = self.governance;
             self.governance = new_governance;
-            self.env().emit_event(GovernanceUpdated {
-                previous,
-                new: new_governance,
-            });
+            self.env().emit_event(GovernanceUpdated { previous, new: new_governance });
             Ok(())
         }
 
@@ -193,10 +190,7 @@ mod treasury {
             }
 
             if tusdt_delta > 0 || native_delta > 0 {
-                self.env().emit_event(FundsDistributed {
-                    tusdt_delta,
-                    native_delta,
-                });
+                self.env().emit_event(FundsDistributed { tusdt_delta, native_delta });
             }
 
             Ok(())
@@ -229,14 +223,10 @@ mod treasury {
                     // current >= amount checked above
                     #[allow(clippy::arithmetic_side_effects)]
                     self.funds_tusdt.insert(fund, &(current - amount));
-                    self.tusdt_allocated = self
-                        .tusdt_allocated
-                        .checked_sub(amount)
-                        .ok_or(Error::ArithmeticError)?;
-                    self.token
-                        .transfer(recipient, amount)
-                        .map_err(|_| Error::TransferFailed)?;
-                }
+                    self.tusdt_allocated =
+                        self.tusdt_allocated.checked_sub(amount).ok_or(Error::ArithmeticError)?;
+                    self.token.transfer(recipient, amount).map_err(|_| Error::TransferFailed)?;
+                },
                 TokenKind::Native => {
                     let current = self.funds_native.get(fund).unwrap_or_default();
                     if current < amount {
@@ -244,22 +234,13 @@ mod treasury {
                     }
                     #[allow(clippy::arithmetic_side_effects)]
                     self.funds_native.insert(fund, &(current - amount));
-                    self.native_allocated = self
-                        .native_allocated
-                        .checked_sub(amount)
-                        .ok_or(Error::ArithmeticError)?;
-                    self.env()
-                        .transfer(recipient, amount)
-                        .map_err(|_| Error::TransferFailed)?;
-                }
+                    self.native_allocated =
+                        self.native_allocated.checked_sub(amount).ok_or(Error::ArithmeticError)?;
+                    self.env().transfer(recipient, amount).map_err(|_| Error::TransferFailed)?;
+                },
             }
 
-            self.env().emit_event(FundReleased {
-                fund,
-                token_kind,
-                amount,
-                recipient,
-            });
+            self.env().emit_event(FundReleased { fund, token_kind, amount, recipient });
             Ok(())
         }
 
@@ -314,11 +295,7 @@ mod treasury {
         let div = d.checked_mul(u128::from(DIVIDEND_BPS))?.checked_div(total_bps)?;
         let buy = d.checked_mul(u128::from(BUYBACK_BPS))?.checked_div(total_bps)?;
         let vot = d.checked_mul(u128::from(VOTING_BPS))?.checked_div(total_bps)?;
-        let assigned = op
-            .checked_add(ins)?
-            .checked_add(div)?
-            .checked_add(buy)?
-            .checked_add(vot)?;
+        let assigned = op.checked_add(ins)?.checked_add(div)?.checked_add(buy)?.checked_add(vot)?;
         let emergency = d.checked_sub(assigned)?;
         Some([
             Balance::try_from(emergency).ok()?,

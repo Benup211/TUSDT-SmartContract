@@ -253,23 +253,16 @@ mod oracle {
                 if reporter_count >= MAX_ROUND_SUBMISSIONS {
                     return Err(Error::MaxSubmissionsReached);
                 }
-                self.round_reporters
-                    .insert((round_id, reporter_count), &coldkey);
+                self.round_reporters.insert((round_id, reporter_count), &coldkey);
                 self.round_reporter_count.insert(
                     round_id,
-                    &reporter_count
-                        .checked_add(1)
-                        .ok_or(Error::ArithmeticError)?,
+                    &reporter_count.checked_add(1).ok_or(Error::ArithmeticError)?,
                 );
             }
 
             self.round_submissions.insert(
                 (round_id, coldkey),
-                &PriceSubmission {
-                    reporter: coldkey,
-                    price,
-                    metadata: metadata.clone(),
-                },
+                &PriceSubmission { reporter: coldkey, price, metadata: metadata.clone() },
             );
 
             self.env().emit_event(PriceSubmitted {
@@ -300,7 +293,7 @@ mod oracle {
                     }
                     let median_price = round_median.ok_or(Error::MedianUnavailable)?;
                     (median_price, median_price, false)
-                }
+                },
             };
             self.ensure_within_deviation(committed_price)?;
             self.finalize_round(
@@ -340,9 +333,7 @@ mod oracle {
         pub fn set_min_submitter_stake(&mut self, min_stake: u128) -> Result<()> {
             self.ensure_governance()?;
             self.min_submitter_stake = min_stake;
-            self.env().emit_event(MinSubmitterStakeUpdated {
-                min_submitter_stake: min_stake,
-            });
+            self.env().emit_event(MinSubmitterStakeUpdated { min_submitter_stake: min_stake });
             Ok(())
         }
 
@@ -360,9 +351,7 @@ mod oracle {
         pub fn set_max_price_deviation(&mut self, max_price_deviation: Ratio) -> Result<()> {
             self.ensure_governance()?;
             self.max_price_deviation = max_price_deviation;
-            self.env().emit_event(MaxPriceDeviationUpdated {
-                max_price_deviation,
-            });
+            self.env().emit_event(MaxPriceDeviationUpdated { max_price_deviation });
             Ok(())
         }
 
@@ -372,10 +361,7 @@ mod oracle {
             self.ensure_controller()?;
             let previous_governance = self.governance;
             self.governance = new_governance;
-            self.env().emit_event(OracleGovernanceUpdated {
-                previous_governance,
-                new_governance,
-            });
+            self.env().emit_event(OracleGovernanceUpdated { previous_governance, new_governance });
             Ok(())
         }
 
@@ -387,10 +373,7 @@ mod oracle {
             self.ensure_governance()?;
             let old_controller = self.controller;
             self.controller = new_controller;
-            self.env().emit_event(OracleControllerUpdated {
-                old_controller,
-                new_controller,
-            });
+            self.env().emit_event(OracleControllerUpdated { old_controller, new_controller });
             Ok(())
         }
 
@@ -559,10 +542,8 @@ mod oracle {
                 return Ok(());
             }
             let abs_diff = candidate.abs_diff(latest.price);
-            let max_diff = latest
-                .price
-                .checked_mul(self.max_price_deviation)
-                .ok_or(Error::ArithmeticError)?;
+            let max_diff =
+                latest.price.checked_mul(self.max_price_deviation).ok_or(Error::ArithmeticError)?;
             if abs_diff > max_diff {
                 return Err(Error::PriceDeviationExceeded);
             }
@@ -589,10 +570,8 @@ mod oracle {
 
             self.committed_round_prices.insert(round_id, &price_data);
             self.latest_price = Some(price_data);
-            self.current_round_id = self
-                .current_round_id
-                .checked_add(1)
-                .ok_or(Error::ArithmeticError)?;
+            self.current_round_id =
+                self.current_round_id.checked_add(1).ok_or(Error::ArithmeticError)?;
 
             self.env().emit_event(RoundCommitted {
                 round_id,
@@ -635,10 +614,7 @@ mod oracle {
                 .get(middle_index.saturating_sub(1))
                 .copied()
                 .ok_or(Error::MedianUnavailable)?;
-            let upper = prices
-                .get(middle_index)
-                .copied()
-                .ok_or(Error::MedianUnavailable)?;
+            let upper = prices.get(middle_index).copied().ok_or(Error::MedianUnavailable)?;
             let average_inner = lower
                 .into_inner()
                 .checked_add(upper.into_inner())

@@ -250,11 +250,7 @@ mod auction {
         ) -> Result<u32> {
             self.ensure_controller()?;
 
-            if self
-                .active_vault_auction
-                .get((vault_owner, vault_id))
-                .is_some()
-            {
+            if self.active_vault_auction.get((vault_owner, vault_id)).is_some() {
                 return Err(Error::AuctionAlreadyExistsForVault);
             }
 
@@ -267,10 +263,7 @@ mod auction {
             let ends_at = now.checked_add(duration).ok_or(Error::ArithmeticError)?;
 
             let auction_id = self.auction_count;
-            self.auction_count = self
-                .auction_count
-                .checked_add(1)
-                .ok_or(Error::ArithmeticError)?;
+            self.auction_count = self.auction_count.checked_add(1).ok_or(Error::ArithmeticError)?;
 
             let auction = Auction {
                 id: auction_id,
@@ -292,14 +285,10 @@ mod auction {
             self.auctions.insert(auction_id, &auction);
             let active_index = self.active_auction_count;
             self.active_auctions.insert(active_index, &auction_id);
-            self.active_auction_indices
-                .insert(auction_id, &active_index);
-            self.active_auction_count = self
-                .active_auction_count
-                .checked_add(1)
-                .ok_or(Error::ArithmeticError)?;
-            self.active_vault_auction
-                .insert((vault_owner, vault_id), &auction_id);
+            self.active_auction_indices.insert(auction_id, &active_index);
+            self.active_auction_count =
+                self.active_auction_count.checked_add(1).ok_or(Error::ArithmeticError)?;
+            self.active_vault_auction.insert((vault_owner, vault_id), &auction_id);
 
             self.env().emit_event(AuctionCreated {
                 auction_id,
@@ -327,10 +316,7 @@ mod auction {
             self.ensure_controller()?;
             let previous_governance = self.governance;
             self.governance = new_governance;
-            self.env().emit_event(AuctionGovernanceUpdated {
-                previous_governance,
-                new_governance,
-            });
+            self.env().emit_event(AuctionGovernanceUpdated { previous_governance, new_governance });
             Ok(())
         }
 
@@ -342,10 +328,7 @@ mod auction {
             self.ensure_governance()?;
             let old_controller = self.controller;
             self.controller = new_controller;
-            self.env().emit_event(AuctionControllerUpdated {
-                old_controller,
-                new_controller,
-            });
+            self.env().emit_event(AuctionControllerUpdated { old_controller, new_controller });
             Ok(())
         }
 
@@ -359,10 +342,7 @@ mod auction {
         ) -> Result<u32> {
             let bidder = self.env().caller();
 
-            let auction = self
-                .auctions
-                .get(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
+            let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
 
             self.ensure_bid_allowed(&auction, bidder)?;
             let prepared = self.prepare_bid(auction, auction_id, bidder, bid_amount, metadata)?;
@@ -372,20 +352,13 @@ mod auction {
                 .map_err(|_| Error::TransferFailed)?;
 
             let bid_id = prepared.bid.id;
-            self.auction_bids
-                .insert((auction_id, bid_id), &prepared.bid);
+            self.auction_bids.insert((auction_id, bid_id), &prepared.bid);
             if prepared.is_new_bid {
-                self.auction_bidder_bids
-                    .insert((auction_id, bidder), &bid_id);
+                self.auction_bidder_bids.insert((auction_id, bidder), &bid_id);
             }
             self.auctions.insert(auction_id, &prepared.auction);
 
-            self.env().emit_event(BidPlaced {
-                auction_id,
-                bid_id,
-                bidder,
-                amount: bid_amount,
-            });
+            self.env().emit_event(BidPlaced { auction_id, bid_id, bidder, amount: bid_amount });
 
             Ok(bid_id)
         }
@@ -405,26 +378,21 @@ mod auction {
 
             let existing_bid_id = self.auction_bidder_bids.get((auction_id, bidder));
             let (bid, transfer_amount, is_new_bid) = if let Some(bid_id) = existing_bid_id {
-                let mut bid = self
-                    .auction_bids
-                    .get((auction_id, bid_id))
-                    .ok_or(Error::BidNotFound)?;
+                let mut bid =
+                    self.auction_bids.get((auction_id, bid_id)).ok_or(Error::BidNotFound)?;
                 if bid_amount <= bid.amount {
                     return Err(Error::BidAmountNotIncreased);
                 }
 
-                let transfer_amount = bid_amount
-                    .checked_sub(bid.amount)
-                    .ok_or(Error::ArithmeticError)?;
+                let transfer_amount =
+                    bid_amount.checked_sub(bid.amount).ok_or(Error::ArithmeticError)?;
                 bid.amount = bid_amount;
                 bid.metadata = metadata;
                 (bid, transfer_amount, false)
             } else {
                 let bid_id = auction.bid_count;
-                auction.bid_count = auction
-                    .bid_count
-                    .checked_add(1)
-                    .ok_or(Error::ArithmeticError)?;
+                auction.bid_count =
+                    auction.bid_count.checked_add(1).ok_or(Error::ArithmeticError)?;
 
                 (
                     Bid {
@@ -446,21 +414,13 @@ mod auction {
                 auction.highest_bid_id = Some(bid.id);
             }
 
-            Ok(PreparedBid {
-                auction,
-                bid,
-                transfer_amount,
-                is_new_bid,
-            })
+            Ok(PreparedBid { auction, bid, transfer_amount, is_new_bid })
         }
 
         /// Finalizes an auction after it has ended, marking the highest bidder as winner. Permissionless — anyone may call once the deadline passes.
         #[ink(message)]
         pub fn finalize_auction(&mut self, auction_id: u32) -> Result<()> {
-            let mut auction = self
-                .auctions
-                .get(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
+            let mut auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
 
             if auction.is_finalized {
                 return Err(Error::AuctionFinalized);
@@ -473,8 +433,7 @@ mod auction {
             }
 
             auction.is_finalized = true;
-            self.active_vault_auction
-                .remove((auction.vault_owner, auction.vault_id));
+            self.active_vault_auction.remove((auction.vault_owner, auction.vault_id));
             self.remove_active_auction(auction_id)?;
 
             let winner = auction.highest_bidder.expect("should have winner");
@@ -507,19 +466,14 @@ mod auction {
         ) -> Result<Balance> {
             self.ensure_controller()?;
 
-            let auction = self
-                .auctions
-                .get(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
+            let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
             if !auction.is_finalized {
                 return Err(Error::AuctionNotEnded);
             }
 
             let winning_bid_id = auction.highest_bid_id.ok_or(Error::AuctionHasNoBids)?;
-            let mut winning_bid = self
-                .auction_bids
-                .get((auction_id, winning_bid_id))
-                .ok_or(Error::BidNotFound)?;
+            let mut winning_bid =
+                self.auction_bids.get((auction_id, winning_bid_id)).ok_or(Error::BidNotFound)?;
             if winning_bid.is_withdrawn {
                 return Err(Error::WinningBidAlreadyTransferred);
             }
@@ -529,8 +483,7 @@ mod auction {
                 .map_err(|_| Error::TransferFailed)?;
 
             winning_bid.is_withdrawn = true;
-            self.auction_bids
-                .insert((auction_id, winning_bid_id), &winning_bid);
+            self.auction_bids.insert((auction_id, winning_bid_id), &winning_bid);
 
             self.env().emit_event(WinningBidTransferred {
                 auction_id,
@@ -545,10 +498,7 @@ mod auction {
         #[ink(message)]
         pub fn withdraw_refund(&mut self, auction_id: u32, bid_id: u32) -> Result<()> {
             let caller = self.env().caller();
-            let mut bid = self
-                .auction_bids
-                .get((auction_id, bid_id))
-                .ok_or(Error::BidNotFound)?;
+            let mut bid = self.auction_bids.get((auction_id, bid_id)).ok_or(Error::BidNotFound)?;
             if bid.bidder != caller {
                 return Err(Error::NotBidder);
             }
@@ -556,10 +506,7 @@ mod auction {
                 return Err(Error::NoRefundAvailable);
             }
 
-            let auction = self
-                .auctions
-                .get(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
+            let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
             if !auction.is_finalized {
                 return Err(Error::AuctionNotEnded);
             }
@@ -567,17 +514,12 @@ mod auction {
                 return Err(Error::WinningBidLocked);
             }
 
-            self.token
-                .transfer(caller, bid.amount)
-                .map_err(|_| Error::TransferFailed)?;
+            self.token.transfer(caller, bid.amount).map_err(|_| Error::TransferFailed)?;
 
             bid.is_withdrawn = true;
             self.auction_bids.insert((auction_id, bid_id), &bid);
 
-            self.env().emit_event(RefundWithdrawn {
-                bidder: caller,
-                amount: bid.amount,
-            });
+            self.env().emit_event(RefundWithdrawn { bidder: caller, amount: bid.amount });
 
             Ok(())
         }
@@ -614,10 +556,7 @@ mod auction {
         /// Returns a paginated list of all bids placed on an auction.
         #[ink(message)]
         pub fn get_bids(&self, auction_id: u32, page: u32) -> Result<Vec<Bid>> {
-            let auction = self
-                .auctions
-                .get(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
+            let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
 
             let total_bids = auction.bid_count;
             let start = page.saturating_mul(PAGE_SIZE);
@@ -688,23 +627,16 @@ mod auction {
 
         /// Removes an auction from the active-auction index using swap-and-pop to keep it contiguous.
         fn remove_active_auction(&mut self, auction_id: u32) -> Result<()> {
-            let active_index = self
-                .active_auction_indices
-                .get(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
-            let last_index = self
-                .active_auction_count
-                .checked_sub(1)
-                .ok_or(Error::ArithmeticError)?;
+            let active_index =
+                self.active_auction_indices.get(auction_id).ok_or(Error::AuctionNotFound)?;
+            let last_index =
+                self.active_auction_count.checked_sub(1).ok_or(Error::ArithmeticError)?;
 
             if active_index != last_index {
-                let last_auction_id = self
-                    .active_auctions
-                    .get(last_index)
-                    .ok_or(Error::AuctionNotFound)?;
+                let last_auction_id =
+                    self.active_auctions.get(last_index).ok_or(Error::AuctionNotFound)?;
                 self.active_auctions.insert(active_index, &last_auction_id);
-                self.active_auction_indices
-                    .insert(last_auction_id, &active_index);
+                self.active_auction_indices.insert(last_auction_id, &active_index);
             }
 
             self.active_auctions.remove(last_index);
@@ -788,10 +720,7 @@ mod auction {
             bidder: AccountId,
             amount: Balance,
         ) -> Result<()> {
-            let mut auction = self
-                .auctions
-                .get(auction_id)
-                .ok_or(Error::AuctionNotFound)?;
+            let mut auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
 
             auction.bid_count = 1;
             auction.highest_bidder = Some(bidder);
@@ -800,14 +729,7 @@ mod auction {
             self.auctions.insert(auction_id, &auction);
             self.auction_bids.insert(
                 (auction_id, 0),
-                &Bid {
-                    id: 0,
-                    auction_id,
-                    bidder,
-                    amount,
-                    metadata: None,
-                    is_withdrawn: false,
-                },
+                &Bid { id: 0, auction_id, bidder, amount, metadata: None, is_withdrawn: false },
             );
             self.auction_bidder_bids.insert((auction_id, bidder), &0);
 

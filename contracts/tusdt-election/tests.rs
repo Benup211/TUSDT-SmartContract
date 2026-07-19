@@ -82,12 +82,7 @@ fn register_stake(stake: Option<u64>) {
 fn alice_snapshot() -> ElectionSnapshot {
     let a = accounts();
     let root = leaf_hash(a.alice, a.alice, 4_000_000_000_000, 10_000);
-    ElectionSnapshot {
-        root,
-        circulating_supply: 1_000_000,
-        netuid: 113,
-        snapshot_block: 0,
-    }
+    ElectionSnapshot { root, circulating_supply: 1_000_000, netuid: 113, snapshot_block: 0 }
 }
 
 /// Constructs an election whose genesis cadence anchor is `genesis` (the constructor reads it from
@@ -222,10 +217,7 @@ fn register_rejects_already_registered() {
     gov.test_schedule(alice_snapshot()).expect("schedule");
     set_caller(a.django);
     gov.register_candidate(200, a.django).expect("register");
-    assert_eq!(
-        gov.register_candidate(200, a.django),
-        Err(Error::AlreadyRegistered)
-    );
+    assert_eq!(gov.register_candidate(200, a.django), Err(Error::AlreadyRegistered));
 }
 
 #[ink::test]
@@ -235,10 +227,7 @@ fn register_rejects_at_term_limit() {
     gov.test_schedule(alice_snapshot()).expect("schedule");
     gov.test_set_terms_served(a.django, 2);
     set_caller(a.django);
-    assert_eq!(
-        gov.register_candidate(200, a.django),
-        Err(Error::TermLimitReached)
-    );
+    assert_eq!(gov.register_candidate(200, a.django), Err(Error::TermLimitReached));
 }
 
 #[ink::test]
@@ -249,10 +238,7 @@ fn register_rejects_insufficient_stake() {
     // Below the owner floor.
     register_stake(Some(1));
     set_caller(a.django);
-    assert_eq!(
-        gov.register_candidate(200, a.django),
-        Err(Error::InsufficientStake)
-    );
+    assert_eq!(gov.register_candidate(200, a.django), Err(Error::InsufficientStake));
 }
 
 #[ink::test]
@@ -315,8 +301,7 @@ fn cast_approval_rejects_after_window_closes() {
     let balance = 4_000_000_000_000u128;
     // A first vote on the 5th opens the window (closing on the 10th).
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
     // Once the window has closed, further votes are rejected before any other check.
     set_block_timestamp(ts_for_day(10));
     set_caller(a.frank);
@@ -334,8 +319,7 @@ fn cast_approval_happy_path() {
 
     let balance = 4_000_000_000_000u128;
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
     // sqrt(4e12) = 2_000_000 at the 1.0x multiplier.
     assert_eq!(gov.approval_weight(a.django), 2_000_000);
     assert_eq!(gov.total_participating_power(), 2_000_000);
@@ -362,8 +346,7 @@ fn cast_approval_applies_multiplier() {
     set_block_timestamp(ts_for_day(5));
 
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 8_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 8_000, Vec::new()).expect("approve");
     // sqrt(4e12) = 2_000_000; 0.8x -> 1_600_000.
     assert_eq!(gov.approval_weight(a.django), 1_600_000);
 }
@@ -402,8 +385,7 @@ fn cast_approval_rejects_double() {
     start_voting_with_candidate(&mut gov, a.django, 200);
     let balance = 4_000_000_000_000u128;
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
     assert_eq!(
         gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()),
         Err(Error::AlreadyApproved)
@@ -428,8 +410,7 @@ fn finalize_records_winner_over_50_percent() {
     start_voting_with_candidate(&mut gov, a.django, 200);
     let balance = 4_000_000_000_000u128;
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
 
     set_block_timestamp(ts_for_day(10)); // == voting_ends_at
     gov.finalize().expect("finalize");
@@ -503,8 +484,7 @@ fn cast_approval_rejects_second_candidate() {
     // Single vote: a leaf votes once; a second vote for a different candidate is rejected and the
     // leaf's power counts once toward the total.
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve django");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve django");
     assert_eq!(
         gov.cast_approval(a.eve, a.alice, balance, 10_000, Vec::new()),
         Err(Error::AlreadyApproved)
@@ -522,8 +502,7 @@ fn finalize_rejects_before_voting_ends() {
     // A first vote on the 5th opens the window (closing on the 10th).
     let balance = 4_000_000_000_000u128;
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
     set_block_timestamp(ts_for_day(6)); // still within the window
     assert_eq!(gov.finalize(), Err(Error::VotingStillOpen));
 }
@@ -541,8 +520,7 @@ fn activate_rejects_before_activation_day() {
     start_voting_with_candidate(&mut gov, a.django, 200);
     let balance = 4_000_000_000_000u128;
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
     set_block_timestamp(ts_for_day(10));
     gov.finalize().expect("finalize");
 
@@ -614,8 +592,7 @@ fn cancel_cycle_rejected_outside_registration() {
     // finalizable after its window, so the incumbent cannot abort a live vote).
     let balance = 4_000_000_000_000u128;
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
     set_caller(a.frank); // incumbent
     assert_eq!(gov.cancel_cycle(), Err(Error::WrongPhase));
     assert_eq!(gov.phase(), Phase::Voting);
@@ -679,8 +656,7 @@ fn finalize_no_winner_when_quorum_unmet() {
 
     set_block_timestamp(ts_for_day(5));
     set_caller(a.alice);
-    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new())
-        .expect("approve");
+    gov.cast_approval(a.django, a.alice, balance, 10_000, Vec::new()).expect("approve");
     // The lone voter is 100% of participating power (> 50%), but turnout misses the quorum.
     assert_eq!(gov.quorum(), 20_000_000_000_000);
     assert_eq!(gov.total_voted_balance(), balance);
