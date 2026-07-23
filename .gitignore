@@ -8,3 +8,4 @@
 /tools/node_modules/
 /tools/.env
 .claude/
+.ruff_cache/
