@@ -427,6 +427,8 @@ mod vault {
         InvalidOracleMaxAge,
         /// No pending parameter update for the given netuid.
         NoPendingContractParamsUpdate,
+        /// No pending global-parameter update.
+        NoPendingGlobalParamsUpdate,
         /// The timelock for the pending parameter update has not yet expired.
         ContractParamsUpdateTimelockActive,
         /// Chain extension call failed at the node level.
@@ -709,7 +711,7 @@ mod vault {
         #[ink(message)]
         pub fn execute_global_params_update(&mut self) -> Result<()> {
             let pending =
-                self.pending_global_params_update.ok_or(Error::NoPendingContractParamsUpdate)?;
+                self.pending_global_params_update.ok_or(Error::NoPendingGlobalParamsUpdate)?;
             if self.env().block_timestamp() < pending.execute_after {
                 return Err(Error::ContractParamsUpdateTimelockActive);
             }
@@ -730,7 +732,7 @@ mod vault {
             let pending = self
                 .pending_global_params_update
                 .take()
-                .ok_or(Error::NoPendingContractParamsUpdate)?;
+                .ok_or(Error::NoPendingGlobalParamsUpdate)?;
 
             self.env().emit_event(GlobalParamsUpdateCancelled { params: pending.params });
 
@@ -1049,7 +1051,7 @@ mod vault {
                 )
                 .map_err(|_| Error::StakeTransferFailed)?;
 
-            let (_, projected_total) = self.ensure_collateral_bounds(netuid, 0, amount)?;
+            let (_, _) = self.ensure_collateral_bounds(netuid, 0, amount)?;
             let netuid_total = self.netuid_total_collateral.get(netuid).unwrap_or_default();
             let projected_netuid =
                 netuid_total.checked_add(amount).ok_or(Error::ArithmeticError)?;
@@ -1068,7 +1070,10 @@ mod vault {
 
             self.save_vault(caller, vault_id, &vault)?;
             self.vault_keys.push(&(caller, vault_id));
-            self.total_collateral_balance = projected_total;
+            self.total_collateral_balance = self
+                .total_collateral_balance
+                .checked_add(amount)
+                .ok_or(Error::ArithmeticError)?;
             self.netuid_total_collateral.insert(netuid, &projected_netuid);
 
             let next_id = vault_id.checked_add(1).ok_or(Error::ArithmeticError)?;
@@ -1116,12 +1121,15 @@ mod vault {
                 )
                 .map_err(|_| Error::StakeTransferFailed)?;
 
-            let (projected_vault, projected_total) =
+            let (projected_vault, _) =
                 self.ensure_collateral_bounds(vault.netuid, vault.collateral_balance, amount)?;
 
             let netuid_total = self.netuid_total_collateral.get(vault.netuid).unwrap_or_default();
             vault.collateral_balance = projected_vault;
-            self.total_collateral_balance = projected_total;
+            self.total_collateral_balance = self
+                .total_collateral_balance
+                .checked_add(amount)
+                .ok_or(Error::ArithmeticError)?;
             let projected_netuid =
                 netuid_total.checked_add(amount).ok_or(Error::ArithmeticError)?;
             self.netuid_total_collateral.insert(vault.netuid, &projected_netuid);
@@ -1156,12 +1164,12 @@ mod vault {
                 return Err(Error::CollateralRatioExceeded);
             }
 
+            vault.borrowed_token_balance = projected_borrowed;
+            self.save_vault(caller, vault_id, &vault)?;
+
             if amount > 0 {
                 self.token.mint(caller, amount).map_err(|_| Error::TransferFailed)?;
             }
-
-            vault.borrowed_token_balance = projected_borrowed;
-            self.save_vault(caller, vault_id, &vault)?;
 
             self.env().emit_event(TokensBorrowed { owner: caller, vault_id, amount });
 

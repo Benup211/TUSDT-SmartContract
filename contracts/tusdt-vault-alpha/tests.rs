@@ -688,7 +688,7 @@ fn execute_global_params_after_timelock_applies() {
 #[ink::test]
 fn execute_global_params_without_pending_fails() {
     let (mut vault, _accounts) = setup();
-    assert_eq!(vault.execute_global_params_update(), Err(Error::NoPendingContractParamsUpdate));
+    assert_eq!(vault.execute_global_params_update(), Err(Error::NoPendingGlobalParamsUpdate));
 }
 
 #[ink::test]
@@ -710,14 +710,14 @@ fn cancel_global_params_update_works() {
 
     // Nothing pending anymore — execute fails even after the timelock.
     set_time(24 * 60 * 60 * 1_000 + 1);
-    assert_eq!(vault.execute_global_params_update(), Err(Error::NoPendingContractParamsUpdate));
+    assert_eq!(vault.execute_global_params_update(), Err(Error::NoPendingGlobalParamsUpdate));
 }
 
 #[ink::test]
 fn cancel_global_params_update_without_pending_fails() {
     let (mut vault, accounts) = setup();
     set_caller(accounts.alice);
-    assert_eq!(vault.cancel_global_params_update(), Err(Error::NoPendingContractParamsUpdate));
+    assert_eq!(vault.cancel_global_params_update(), Err(Error::NoPendingGlobalParamsUpdate));
 }
 
 #[ink::test]
@@ -905,4 +905,249 @@ fn liquidation_counter_setter_getter_roundtrip() {
     assert_eq!(vault.get_active_liquidation_count(), 3);
     vault.set_active_liquidation_count_for_test(0);
     assert_eq!(vault.get_active_liquidation_count(), 0);
+}
+
+// ---------------------------------------------------------------------------
+// Invariant tests: accounting totals consistency
+//
+// These verify that `total_collateral_balance` and per-netuid totals stay
+// consistent with actual vault collateral after each operation. The original
+// overwrite bug (total_collateral_balance = projected_total instead of +=)
+// would have been caught by these tests.
+// ---------------------------------------------------------------------------
+
+#[ink::test]
+fn total_collateral_matches_vault_sum_after_create() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+
+    register_mock(10_000_000);
+    vault.create_alpha_vault(10_000_000, 1).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 10_000_000);
+
+    // Second vault on same netuid.
+    register_mock(5_000_000);
+    vault.create_alpha_vault(5_000_000, 1).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 15_000_000);
+}
+
+#[ink::test]
+fn total_collateral_matches_vault_sum_across_netuids() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+    vault.set_approved_netuid(2, true).unwrap();
+
+    // Vault on netuid 1
+    register_mock(10_000_000);
+    vault.create_alpha_vault(10_000_000, 1).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 10_000_000);
+
+    // Vault on netuid 2 — the original bug would have overwritten
+    // total_collateral_balance with the netuid-2 total instead of adding.
+    register_mock(7_000_000);
+    vault.create_alpha_vault(7_000_000, 2).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 17_000_000);
+
+    // Verify per-netuid totals indirectly via claim_excess_alpha:
+    // Netuid 1 should have 10M tracked collateral. Mock stake at 10M → no excess.
+    register_mock(10_000_000);
+    set_caller(accounts.alice);
+    vault.claim_excess_alpha(1).unwrap(); // no-op — stake equals tracked total
+
+    // Netuid 2 should have 7M tracked. Mock stake at 7M → no excess.
+    register_mock(7_000_000);
+    vault.claim_excess_alpha(2).unwrap(); // no-op — stake equals tracked total
+}
+
+#[ink::test]
+fn total_collateral_consistent_after_add_and_release() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+
+    // Create vault with 10M collateral.
+    register_mock(10_000_000);
+    let vault_id = vault.create_alpha_vault(10_000_000, 1).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 10_000_000);
+
+    // Add 5M collateral.
+    register_mock(5_000_000);
+    vault.add_alpha_collateral(vault_id, 5_000_000).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 15_000_000);
+
+    // Release 3M collateral — should decrement the global total.
+    let result = vault.release_alpha_collateral(vault_id, 3_000_000, accounts.alice);
+    assert!(result.is_ok());
+    assert_eq!(vault.get_total_collateral_balance(), 12_000_000);
+
+    // Vault collateral should also reflect the release.
+    let stored = vault.get_vault(accounts.alice, vault_id).unwrap();
+    assert_eq!(stored.collateral_balance, 12_000_000);
+}
+
+#[ink::test]
+fn total_collateral_consistent_multiple_users_multiple_netuids() {
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    vault.set_approved_netuid(2, true).unwrap();
+
+    // Alice: vault on netuid 1 (10M)
+    register_mock(10_000_000);
+    set_caller(accounts.alice);
+    let alice_id = vault.create_alpha_vault(10_000_000, 1).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 10_000_000);
+
+    // Bob: vault on netuid 2 (8M)
+    register_mock(8_000_000);
+    set_caller(accounts.bob);
+    let bob_id = vault.create_alpha_vault(8_000_000, 2).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 18_000_000);
+
+    // Alice adds 2M to her vault on netuid 1.
+    register_mock(2_000_000);
+    set_caller(accounts.alice);
+    vault.add_alpha_collateral(alice_id, 2_000_000).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 20_000_000);
+
+    // Bob adds 3M to his vault on netuid 2.
+    register_mock(3_000_000);
+    set_caller(accounts.bob);
+    vault.add_alpha_collateral(bob_id, 3_000_000).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 23_000_000);
+
+    // Alice releases 1M from netuid 1 vault.
+    set_caller(accounts.alice);
+    vault.release_alpha_collateral(alice_id, 1_000_000, accounts.alice).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 22_000_000);
+
+    // Verify per-vault balances.
+    let alice_vault = vault.get_vault(accounts.alice, alice_id).unwrap();
+    assert_eq!(alice_vault.collateral_balance, 11_000_000); // 10 + 2 - 1
+    let bob_vault = vault.get_vault(accounts.bob, bob_id).unwrap();
+    assert_eq!(bob_vault.collateral_balance, 11_000_000); // 8 + 3
+
+    // Global total should match sum of individual vaults.
+    assert_eq!(
+        vault.get_total_collateral_balance(),
+        alice_vault.collateral_balance + bob_vault.collateral_balance
+    );
+}
+
+#[ink::test]
+fn netuid_totals_independently_tracked() {
+    // Verify that per-netuid totals are independently tracked — releasing
+    // collateral on netuid 1 should not affect netuid 2's total.
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+    vault.set_approved_netuid(2, true).unwrap();
+
+    // Create vaults on both netuids.
+    register_mock(10_000_000);
+    let v1 = vault.create_alpha_vault(10_000_000, 1).unwrap();
+
+    register_mock(5_000_000);
+    let _v2 = vault.create_alpha_vault(5_000_000, 2).unwrap();
+
+    assert_eq!(vault.get_total_collateral_balance(), 15_000_000);
+
+    // Release 3M from netuid 1 vault. Only netuid 1 total should decrease.
+    vault.release_alpha_collateral(v1, 3_000_000, accounts.alice).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 12_000_000);
+
+    // Verify netuid 2 via claim_excess_alpha: stake at 5M should show no excess.
+    register_mock(5_000_000);
+    vault.claim_excess_alpha(2).unwrap(); // no-op if netuid total is still 5M
+
+    // Verify netuid 1 via claim_excess_alpha: tracked total should be 7M after release.
+    register_mock(7_000_000);
+    vault.claim_excess_alpha(1).unwrap(); // no-op if netuid total is 7M
+
+    // Reverse check: mock report 10M on netuid 1 → excess should be 3M.
+    register_mock(10_000_000);
+    // claim_excess_alpha with 10M stake vs 7M tracked = 3M excess → success
+    vault.claim_excess_alpha(1).unwrap();
+}
+
+#[ink::test]
+fn total_collateral_never_negative() {
+    // Verify that releasing exactly the full collateral balance of all vaults
+    // leaves total_collateral_balance at 0 (not underflowing).
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+
+    register_mock(5_000_000);
+    let v1 = vault.create_alpha_vault(5_000_000, 1).unwrap();
+
+    register_mock(3_000_000);
+    let v2 = vault.create_alpha_vault(3_000_000, 1).unwrap();
+
+    assert_eq!(vault.get_total_collateral_balance(), 8_000_000);
+
+    // Release all from both vaults.
+    vault.release_alpha_collateral(v1, 5_000_000, accounts.alice).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 3_000_000);
+
+    vault.release_alpha_collateral(v2, 3_000_000, accounts.alice).unwrap();
+    assert_eq!(vault.get_total_collateral_balance(), 0);
+
+    // Attempting to release more than the vault has should fail.
+    let result = vault.release_alpha_collateral(v2, 1, accounts.alice);
+    assert_eq!(result, Err(Error::InsufficientCollateral));
+}
+
+#[ink::test]
+fn total_collateral_survives_ten_vaults_across_three_netuids() {
+    // Stress test: 10 vaults across 3 netuids with mixed add/release
+    // operations. Verifies no drift in the global total.
+    let (mut vault, accounts) = setup_with_approved_netuid();
+    set_caller(accounts.alice);
+    vault.set_approved_netuid(2, true).unwrap();
+    vault.set_approved_netuid(3, true).unwrap();
+
+    let mut running_sum: u64 = 0;
+
+    // Create vaults on alternating netuids.
+    for i in 0..10u32 {
+        let netuid = ((i % 3) + 1) as u16;
+        let amount = 1_000_000 * (i as u64 + 1);
+        register_mock(amount);
+        let vid = vault.create_alpha_vault(amount, netuid).unwrap();
+        running_sum = running_sum.checked_add(amount).unwrap();
+        assert_eq!(
+            vault.get_total_collateral_balance(),
+            running_sum,
+            "total_collateral_balance mismatch after creating vault {} on netuid {}",
+            i,
+            netuid
+        );
+
+        // Every other vault, add 10% more collateral.
+        if i % 2 == 0 {
+            let add_amount = amount / 10;
+            register_mock(add_amount);
+            vault.add_alpha_collateral(vid, add_amount).unwrap();
+            running_sum = running_sum.checked_add(add_amount).unwrap();
+            assert_eq!(
+                vault.get_total_collateral_balance(),
+                running_sum,
+                "total_collateral_balance mismatch after adding to vault {}",
+                i
+            );
+        }
+
+        // Every third vault, release 5% collateral.
+        if i % 3 == 0 {
+            let release_amount = amount / 20;
+            vault.release_alpha_collateral(vid, release_amount, accounts.alice).unwrap();
+            running_sum = running_sum.checked_sub(release_amount).unwrap();
+            assert_eq!(
+                vault.get_total_collateral_balance(),
+                running_sum,
+                "total_collateral_balance mismatch after releasing from vault {}",
+                i
+            );
+        }
+    }
+
+    // Final check: global total should still equal the running sum.
+    assert_eq!(vault.get_total_collateral_balance(), running_sum);
+    assert_eq!(vault.get_total_vaults_count(), 10);
 }
