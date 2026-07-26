@@ -68,7 +68,8 @@ impl TusdtVaultAlpha {
     }
 
     /// Validates a collateral addition and computes the projected per-vault and
-    /// per-netuid totals.
+    /// per-netuid totals.  NOTE: the second return value is the per-**netuid**
+    /// projected total — NOT the global `total_collateral_balance`.
     pub(crate) fn ensure_collateral_bounds(
         &self,
         netuid: u16,
@@ -87,10 +88,10 @@ impl TusdtVaultAlpha {
             .netuid_total_collateral
             .get(netuid)
             .unwrap_or_default();
-        let projected_total = netuid_total
+        let projected_netuid_total = netuid_total
             .checked_add(addition)
             .ok_or(Error::ArithmeticError)?;
 
-        Ok((projected_vault, projected_total))
+        Ok((projected_vault, projected_netuid_total))
     }
 }

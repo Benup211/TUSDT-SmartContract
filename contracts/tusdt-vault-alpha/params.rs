@@ -63,15 +63,18 @@ impl TusdtVaultAlpha {
 
     /// Validates per-netuid contract parameters.
     ///
-    /// - `collateral_ratio` must be >= 100% and strictly greater than `liquidation_ratio`
-    /// - `liquidation_ratio` must be >= 100%
+    /// - `collateral_ratio` must be in [100%, 1_000_000%] and strictly greater than `liquidation_ratio`
+    /// - `liquidation_ratio` must be in [100%, 1_000_000%]
     /// - `liquidation_fee` must be <= 100%
     pub(crate) fn validate_contract_params(params: &VaultContractParams) -> Result<()> {
         let one = Ratio::one();
-        if params.collateral_ratio < one {
+        // Upper bound prevents panic in to_basis_points() which fails above ~429,496%.
+        // 1_000_000% (10,000,000 bps) is a safe ceiling well below the conversion limit.
+        let max_ratio = Ratio::from_basis_points(10_000_000);
+        if params.collateral_ratio < one || params.collateral_ratio > max_ratio {
             return Err(Error::InvalidRatio);
         }
-        if params.liquidation_ratio < one {
+        if params.liquidation_ratio < one || params.liquidation_ratio > max_ratio {
             return Err(Error::InvalidRatio);
         }
         if params.collateral_ratio <= params.liquidation_ratio {
