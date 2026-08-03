@@ -18,7 +18,7 @@ mod vault {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
 
     mod params {
         include!("params.rs");
@@ -1070,10 +1070,8 @@ mod vault {
 
             self.save_vault(caller, vault_id, &vault)?;
             self.vault_keys.push(&(caller, vault_id));
-            self.total_collateral_balance = self
-                .total_collateral_balance
-                .checked_add(amount)
-                .ok_or(Error::ArithmeticError)?;
+            self.total_collateral_balance =
+                self.total_collateral_balance.checked_add(amount).ok_or(Error::ArithmeticError)?;
             self.netuid_total_collateral.insert(netuid, &projected_netuid);
 
             let next_id = vault_id.checked_add(1).ok_or(Error::ArithmeticError)?;
@@ -1126,10 +1124,8 @@ mod vault {
 
             let netuid_total = self.netuid_total_collateral.get(vault.netuid).unwrap_or_default();
             vault.collateral_balance = projected_vault;
-            self.total_collateral_balance = self
-                .total_collateral_balance
-                .checked_add(amount)
-                .ok_or(Error::ArithmeticError)?;
+            self.total_collateral_balance =
+                self.total_collateral_balance.checked_add(amount).ok_or(Error::ArithmeticError)?;
             let projected_netuid =
                 netuid_total.checked_add(amount).ok_or(Error::ArithmeticError)?;
             self.netuid_total_collateral.insert(vault.netuid, &projected_netuid);
