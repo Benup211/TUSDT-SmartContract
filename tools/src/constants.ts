@@ -38,10 +38,6 @@ export const CONTRACT_CONFIGS = {
     artifactPath: resolve(REPO_ROOT, "target/ink/tusdt_election/tusdt_election.contract"),
     manifestPath: resolve(REPO_ROOT, "contracts/tusdt-election/Cargo.toml"),
   },
-  otc: {
-    artifactPath: resolve(REPO_ROOT, "target/ink/tusdt_otc/tusdt_otc.contract"),
-    manifestPath: resolve(REPO_ROOT, "contracts/tusdt-otc/Cargo.toml"),
-  },
 } as const;
 
 export type ContractName = keyof typeof CONTRACT_CONFIGS;
