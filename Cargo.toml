@@ -20,6 +20,7 @@ members = [
     "contracts/tusdt-treasury",
     "contracts/tusdt-governance",
     "contracts/tusdt-election",
+    "contracts/tusdt-lending-pool",
 ]
 resolver = "2"
 

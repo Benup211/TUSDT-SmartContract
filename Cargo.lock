@@ -7030,11 +7030,23 @@ dependencies = [
  "tusdt-auction",
  "tusdt-election",
  "tusdt-env",
+ "tusdt-lending-pool",
  "tusdt-oracle",
  "tusdt-primitives",
  "tusdt-treasury",
  "tusdt-vault-alpha",
  "tusdt-voting",
+]
+
+[[package]]
+name = "tusdt-lending-pool"
+version = "0.1.0"
+dependencies = [
+ "ink",
+ "tusdt-env",
+ "tusdt-erc20",
+ "tusdt-oracle",
+ "tusdt-primitives",
 ]
 
 [[package]]

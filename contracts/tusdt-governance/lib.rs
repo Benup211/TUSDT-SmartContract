@@ -3,9 +3,9 @@
 #![allow(clippy::type_complexity)]
 
 pub use self::governance::{
-    CouncilSet, GovernanceParams, MaintainerChanged, Proposal, ProposalExecuted, ProposalFinalized,
-    ProposalKind, ProposalStatus, ProposalSubmitted, Snapshot, SnapshotSubmitted, TusdtGovernance,
-    TusdtGovernanceRef, Voted,
+    CouncilSet, GovernanceParams, MaintainerChanged, PoolAddressUpdated, Proposal,
+    ProposalExecuted, ProposalFinalized, ProposalKind, ProposalStatus, ProposalSubmitted, Snapshot,
+    SnapshotSubmitted, TusdtGovernance, TusdtGovernanceRef, Voted,
 };
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
@@ -16,6 +16,7 @@ mod governance {
     use ink::{env::call::FromAccountId, ToAccountId};
     use tusdt_auction::TusdtAuctionRef;
     use tusdt_election::TusdtElectionRef;
+    use tusdt_lending_pool::TusdtLendingPoolRef;
     use tusdt_oracle::{PriceData, TusdtOracleRef};
     use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
@@ -164,6 +165,7 @@ mod governance {
         vault: TusdtVaultAlphaRef,
         auction: TusdtAuctionRef,
         oracle: TusdtOracleRef,
+        pool: TusdtLendingPoolRef,
         /// The subnet whose alpha stake gates proposer eligibility. Bound to the elected maintainer
         /// (the subnet they govern) — only the election contract changes it, via [`TusdtGovernance::election_set_netuid`].
         netuid: u16,
@@ -252,6 +254,15 @@ mod governance {
         new_vault: AccountId,
     }
 
+    /// Emitted when the stored lending pool contract address is updated by the maintainer.
+    #[ink(event)]
+    pub struct PoolAddressUpdated {
+        #[ink(topic)]
+        old_pool: AccountId,
+        #[ink(topic)]
+        new_pool: AccountId,
+    }
+
     /// Emitted when the stored auction contract address is updated by the maintainer.
     #[ink(event)]
     pub struct GovernanceAuctionUpdated {
@@ -306,6 +317,7 @@ mod governance {
         TreasuryCallFailed,
         VaultCallFailed,
         AuctionCallFailed,
+        PoolCallFailed,
         OracleCallFailed,
         /// Cross-contract call to the vault's token-controller transfer failed.
         VaultTokenCallFailed,
@@ -375,6 +387,7 @@ mod governance {
                 treasury: TusdtTreasuryRef::from_account_id(treasury_address),
                 vault: TusdtVaultAlphaRef::from_account_id(vault_address),
                 auction: TusdtAuctionRef::from_account_id(auction_address),
+                pool: TusdtLendingPoolRef::from_account_id([0u8; 32].into()),
                 oracle: TusdtOracleRef::from_account_id(oracle_address),
                 netuid: DEFAULT_NETUID,
                 params: GovernanceParams::default_params(),
@@ -470,6 +483,22 @@ mod governance {
             self.vault = TusdtVaultAlphaRef::from_account_id(new_vault);
             self.env().emit_event(VaultAddressUpdated { old_vault, new_vault });
             Ok(())
+        }
+
+        /// Updates the stored lending pool contract address. Maintainer-only.
+        #[ink(message)]
+        pub fn update_pool_address(&mut self, new_pool: AccountId) -> Result<()> {
+            self.ensure_maintainer()?;
+            let old_pool = self.pool.to_account_id();
+            self.pool = TusdtLendingPoolRef::from_account_id(new_pool);
+            self.env().emit_event(PoolAddressUpdated { old_pool, new_pool });
+            Ok(())
+        }
+
+        /// Returns the stored lending pool address.
+        #[ink(message)]
+        pub fn pool_address(&self) -> AccountId {
+            self.pool.to_account_id()
         }
 
         /// Updates the stored auction contract address. Maintainer-only.
