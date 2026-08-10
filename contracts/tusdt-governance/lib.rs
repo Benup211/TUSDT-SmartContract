@@ -16,7 +16,10 @@ mod governance {
     use ink::{env::call::FromAccountId, ToAccountId};
     use tusdt_auction::TusdtAuctionRef;
     use tusdt_election::TusdtElectionRef;
-    use tusdt_lending_pool::TusdtLendingPoolRef;
+    use tusdt_lending_pool::{
+        AlphaMarketParamsConfig, InterestRateParamsConfig, PoolGlobalParamsConfig,
+        TusdtLendingPoolRef,
+    };
     use tusdt_oracle::{PriceData, TusdtOracleRef};
     use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
@@ -693,6 +696,104 @@ mod governance {
         #[ink(message)]
         pub fn auction_set_admin(&mut self, admin: Option<AccountId>) -> Result<()> {
             self.forward_auction_set_admin(admin)
+        }
+
+        // ----- Lending Pool: maintainer-gated (governing/config) -----
+
+        #[ink(message)]
+        pub fn pool_set_approved_netuid(&mut self, netuid: u16, approved: bool) -> Result<()> {
+            self.forward_pool_set_approved_netuid(netuid, approved)
+        }
+
+        #[ink(message)]
+        pub fn pool_set_alpha_params(
+            &mut self,
+            netuid: u16,
+            config: AlphaMarketParamsConfig,
+        ) -> Result<()> {
+            self.forward_pool_set_alpha_params(netuid, config)
+        }
+
+        #[ink(message)]
+        pub fn pool_cancel_alpha_params_update(&mut self, netuid: u16) -> Result<()> {
+            self.forward_pool_cancel_alpha_params_update(netuid)
+        }
+
+        #[ink(message)]
+        pub fn pool_set_market_params(
+            &mut self,
+            market_id: u8,
+            config: InterestRateParamsConfig,
+        ) -> Result<()> {
+            self.forward_pool_set_market_params(market_id, config)
+        }
+
+        #[ink(message)]
+        pub fn pool_cancel_market_params_update(&mut self, market_id: u8) -> Result<()> {
+            self.forward_pool_cancel_market_params_update(market_id)
+        }
+
+        #[ink(message)]
+        pub fn pool_set_global_params(&mut self, config: PoolGlobalParamsConfig) -> Result<()> {
+            self.forward_pool_set_global_params(config)
+        }
+
+        #[ink(message)]
+        pub fn pool_cancel_global_params_update(&mut self) -> Result<()> {
+            self.forward_pool_cancel_global_params_update()
+        }
+
+        #[ink(message)]
+        pub fn pool_update_platform(&mut self, new_platform: AccountId) -> Result<()> {
+            self.forward_pool_update_platform(new_platform)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
+            self.forward_pool_update_treasury(new_treasury)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
+            self.forward_pool_update_oracle_address(new_oracle)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_ltoken_address(
+            &mut self,
+            market_id: u8,
+            new_ltoken: AccountId,
+        ) -> Result<()> {
+            self.forward_pool_update_ltoken_address(market_id, new_ltoken)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_pool_hotkey(
+            &mut self,
+            new_hotkey: AccountId,
+            netuids: Vec<u16>,
+        ) -> Result<()> {
+            self.forward_pool_update_pool_hotkey(new_hotkey, netuids)
+        }
+
+        #[ink(message)]
+        pub fn pool_claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
+            self.forward_pool_claim_surplus_tusdt(amount)
+        }
+
+        #[ink(message)]
+        pub fn pool_transfer_native_to_treasury(&mut self) -> Result<()> {
+            self.forward_pool_transfer_native_to_treasury()
+        }
+
+        #[ink(message)]
+        pub fn pool_unpause(&mut self) -> Result<()> {
+            self.forward_pool_unpause()
+        }
+
+        #[ink(message)]
+        pub fn pool_update_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
+            self.forward_pool_update_maintainer(new_maintainer)
         }
 
         /// Returns the current governance parameters.

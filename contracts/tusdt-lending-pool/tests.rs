@@ -219,7 +219,7 @@ fn non_governance_cannot_unpause() {
     set_caller(accounts.alice);
     pool.pause().unwrap();
     set_caller(accounts.bob);
-    assert_eq!(pool.unpause(), Err(Error::NotGovernance));
+    assert_eq!(pool.unpause(), Err(Error::NotMaintainer));
 }
 
 #[ink::test]
@@ -286,7 +286,7 @@ fn non_governance_cannot_manage_netuids() {
     set_caller(accounts.bob);
     assert_eq!(
         pool.set_approved_netuid(1, true),
-        Err(Error::NotGovernance)
+        Err(Error::NotMaintainer)
     );
 }
 
@@ -661,7 +661,7 @@ fn non_governance_cannot_schedule_market_params() {
     };
     assert_eq!(
         pool.set_market_params(0, config),
-        Err(Error::NotGovernance)
+        Err(Error::NotMaintainer)
     );
 }
 
@@ -680,7 +680,7 @@ fn non_governance_cannot_cancel_market_params() {
     set_caller(accounts.bob);
     assert_eq!(
         pool.cancel_market_params_update(0),
-        Err(Error::NotGovernance)
+        Err(Error::NotMaintainer)
     );
 }
 
@@ -1045,4 +1045,454 @@ fn ensure_idle_guards_reentrancy() {
     // After clearing, it can be re-entered
     pool.ensure_idle().unwrap();
     pool.set_idle();
+}
+
+// ---------------------------------------------------------------------------
+// Position key lifecycle
+// ---------------------------------------------------------------------------
+
+#[ink::test]
+fn update_position_key_pushes_when_position_nonzero() {
+    let (mut pool, accounts) = setup();
+    // Seed a non-zero position without pushing to position_keys
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 100,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    // Call update — should push the key
+    pool.update_position_key(0, accounts.alice);
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].0, (0, accounts.alice));
+    assert_eq!(all[0].1.ltoken_balance, 100);
+}
+
+#[ink::test]
+fn update_position_key_removes_when_zero() {
+    let (mut pool, accounts) = setup();
+    // Seed a non-zero position with a key
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 100,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.alice);
+    assert_eq!(pool.get_all_positions(0).len(), 1);
+
+    // Zero the position and update — should remove the key
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.alice);
+    assert_eq!(pool.get_all_positions(0).len(), 0);
+}
+
+#[ink::test]
+fn update_position_key_no_double_push() {
+    let (mut pool, accounts) = setup();
+    // Seed a non-zero position with a key
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 100,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.alice);
+    assert_eq!(pool.get_all_positions(0).len(), 1);
+
+    // Call update again — should NOT push a duplicate
+    pool.update_position_key(0, accounts.alice);
+    assert_eq!(pool.get_all_positions(0).len(), 1);
+}
+
+#[ink::test]
+fn update_position_key_self_heals_legacy_duplicates() {
+    let (mut pool, accounts) = setup();
+    // Simulate legacy duplicated keys by pushing 3 times
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 100,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.debug_push_position_key(0, accounts.alice);
+    pool.debug_push_position_key(0, accounts.alice);
+    pool.debug_push_position_key(0, accounts.alice);
+    // 3 duplicate keys in storage
+    // The read-side dedup within get_all_positions handles it
+    let all = pool.get_all_positions(0);
+    // With read-side dedup, only 1 entry returned
+    assert_eq!(all.len(), 1);
+
+    // Now call update — it removes all duplicates and pushes exactly once
+    pool.update_position_key(0, accounts.alice);
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].0, (0, accounts.alice));
+
+    // A second update is a no-op
+    pool.update_position_key(0, accounts.alice);
+    assert_eq!(pool.get_all_positions(0).len(), 1);
+}
+
+#[ink::test]
+fn swap_removal_preserves_other_keys() {
+    let (mut pool, accounts) = setup();
+    // Seed 3 positions: alice market 0, bob market 0, alice market 1
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 100,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.alice);
+    pool.debug_set_position(
+        0,
+        accounts.bob,
+        Position {
+            ltoken_balance: 200,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.bob);
+    pool.debug_set_position(
+        1,
+        accounts.alice,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 50,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(1, accounts.alice);
+
+    assert_eq!(pool.get_all_positions(0).len(), 3);
+
+    // Zero out bob's position — should remove only bob's key
+    pool.debug_set_position(
+        0,
+        accounts.bob,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.bob);
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 2);
+    // Alice's positions must still be present
+    let keys: Vec<(u8, ink::primitives::AccountId)> = all.iter().map(|(k, _)| *k).collect();
+    assert!(keys.contains(&(0, accounts.alice)));
+    assert!(keys.contains(&(1, accounts.alice)));
+}
+
+#[ink::test]
+fn multi_market_positions_independent() {
+    let (mut pool, accounts) = setup();
+    // User has supply on market 0 and debt on market 1
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 100,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.alice);
+    pool.debug_set_position(
+        1,
+        accounts.alice,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 50,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(1, accounts.alice);
+
+    assert_eq!(pool.get_all_positions(0).len(), 2);
+
+    // Zero-out market 0 only
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 0,
+            alpha_principal: 0,
+        },
+    );
+    pool.update_position_key(0, accounts.alice);
+
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 1);
+    // Market 1 entry should still exist
+    assert_eq!(all[0].0, (1, accounts.alice));
+    assert_eq!(all[0].1.scaled_debt, 50);
+}
+
+#[ink::test]
+fn deposit_withdraw_deposit_alpha_no_duplicate_keys() {
+    let (mut pool, accounts) = setup_with_alpha(1);
+    set_caller(accounts.alice);
+    register_mock(1_000);
+
+    // First deposit
+    pool.deposit_alpha(1, 500).unwrap();
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 1, "should have 1 position after first deposit");
+
+    // Withdraw all — position should be removed from position_keys
+    pool.withdraw_alpha(1, 500, accounts.bob).unwrap();
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 0, "should have 0 positions after full withdraw");
+
+    // Deposit again — should create exactly 1 entry (NOT 2)
+    pool.deposit_alpha(1, 300).unwrap();
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 1, "should have exactly 1 position after re-deposit");
+    let (key, pos) = &all[0];
+    assert_eq!(key.1, accounts.alice);
+    assert_eq!(pos.alpha_principal, 300);
+}
+
+#[ink::test]
+fn partial_withdraw_alpha_keeps_key() {
+    let (mut pool, accounts) = setup_with_alpha(1);
+    set_caller(accounts.alice);
+    register_mock(1_000);
+
+    pool.deposit_alpha(1, 500).unwrap();
+    assert_eq!(pool.get_all_positions(0).len(), 1);
+
+    // Withdraw only part of the collateral
+    pool.withdraw_alpha(1, 200, accounts.bob).unwrap();
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 1, "key should remain after partial withdraw");
+    let (_, pos) = &all[0];
+    assert_eq!(pos.alpha_principal, 300);
+}
+
+#[ink::test]
+fn borrow_only_orphan_self_heal() {
+    let (mut pool, accounts) = setup();
+    // Simulate a legacy borrow-only position: debt on market 0, no key
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 50,
+            alpha_principal: 0,
+        },
+    );
+    // No key was pushed — simulate orphan
+    // Call update_position_key — should self-heal by pushing the key
+    pool.update_position_key(0, accounts.alice);
+    let all = pool.get_all_positions(0);
+    assert_eq!(all.len(), 1);
+    assert_eq!(all[0].0, (0, accounts.alice));
+    assert_eq!(all[0].1.scaled_debt, 50);
+}
+
+// ---------------------------------------------------------------------------
+// Parameter getters
+// ---------------------------------------------------------------------------
+
+#[ink::test]
+fn get_global_params_returns_defaults() {
+    let (pool, _accounts) = setup();
+    let params = pool.get_global_params();
+    assert_eq!(params.close_factor, 5000);
+    assert_eq!(params.performance_fee, 2500);
+    assert_eq!(params.max_oracle_age_ms, 1_800_000);
+    assert_eq!(params.supply_cap_tao, 0);
+    assert_eq!(params.supply_cap_tusdt, 0);
+}
+
+#[ink::test]
+fn get_market_params_returns_configured_params() {
+    let (pool, _accounts) = setup();
+    let params = pool.get_market_params(0).expect("market 0 params should exist");
+    // Default TAO interest params: base=0, optimal=8000, slope1=400, slope2=9600, reserve=2000
+    assert_eq!(params.base_rate, 0);
+    assert_eq!(params.optimal_utilization, 8000);
+    assert_eq!(params.slope1, 400);
+}
+
+#[ink::test]
+fn get_alpha_params_returns_none_for_unconfigured_netuid() {
+    let (pool, _accounts) = setup();
+    assert!(pool.get_alpha_params(99).is_none());
+}
+
+#[ink::test]
+fn get_alpha_params_returns_configured_params() {
+    let (mut pool, accounts) = setup_with_alpha(1);
+    set_caller(accounts.alice);
+    // Configure alpha params for netuid 1
+    let config = AlphaMarketParamsConfig {
+        collateral_factor: 6000,
+        liquidation_threshold: 7000,
+        liquidation_bonus: 800,
+        supply_cap: 1_000_000,
+    };
+    pool.set_alpha_params(1, config).unwrap();
+    // Execute the update
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
+        PARAMS_TIMELOCK_MS + 1,
+    );
+    pool.execute_alpha_params_update(1).unwrap();
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(0);
+
+    let params = pool.get_alpha_params(1).expect("alpha params should exist");
+    assert_eq!(params.collateral_factor, 6000);
+    assert_eq!(params.liquidation_threshold, 7000);
+    assert_eq!(params.supply_cap, 1_000_000);
+}
+
+// ---------------------------------------------------------------------------
+// Maintainer role
+// ---------------------------------------------------------------------------
+
+#[ink::test]
+fn maintainer_initialized_to_deployer() {
+    let (pool, accounts) = setup();
+    assert_eq!(pool.maintainer(), accounts.alice);
+}
+
+#[ink::test]
+fn governance_can_update_maintainer() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    pool.update_maintainer(accounts.bob).unwrap();
+    assert_eq!(pool.maintainer(), accounts.bob);
+}
+
+#[ink::test]
+fn non_governance_cannot_update_maintainer() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.bob); // bob is NOT governance
+    assert_eq!(
+        pool.update_maintainer(accounts.charlie),
+        Err(Error::NotGovernance)
+    );
+}
+
+#[ink::test]
+fn maintainer_can_set_alpha_params() {
+    let (mut pool, accounts) = setup_with_alpha(1);
+    set_caller(accounts.alice);
+    // alice is both governance and maintainer initially
+    let config = AlphaMarketParamsConfig {
+        collateral_factor: 6000,
+        liquidation_threshold: 7000,
+        liquidation_bonus: 800,
+        supply_cap: 1_000_000,
+    };
+    pool.set_alpha_params(1, config).unwrap();
+}
+
+#[ink::test]
+fn non_maintainer_cannot_set_params() {
+    let (mut pool, accounts) = setup_with_alpha(1);
+    set_caller(accounts.alice);
+    // Transfer maintainer to bob
+    pool.update_maintainer(accounts.bob).unwrap();
+    // charlie is neither maintainer nor governance
+    set_caller(accounts.charlie);
+    let config = AlphaMarketParamsConfig {
+        collateral_factor: 6000,
+        liquidation_threshold: 7000,
+        liquidation_bonus: 800,
+        supply_cap: 1_000_000,
+    };
+    assert_eq!(
+        pool.set_alpha_params(1, config),
+        Err(Error::NotMaintainer)
+    );
+}
+
+#[ink::test]
+fn maintainer_cannot_update_governance() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    // Transfer maintainer to bob
+    pool.update_maintainer(accounts.bob).unwrap();
+    // Bob is maintainer but cannot transfer governance
+    set_caller(accounts.bob);
+    assert_eq!(
+        pool.update_governance(accounts.charlie),
+        Err(Error::NotGovernance)
+    );
+}
+
+#[ink::test]
+fn governance_can_still_call_maintainer_functions() {
+    let (mut pool, accounts) = setup_with_alpha(1);
+    set_caller(accounts.alice);
+    // Transfer maintainer to bob
+    pool.update_maintainer(accounts.bob).unwrap();
+    // alice is still governance — she can still do maintainer-gated operations
+    set_caller(accounts.alice);
+    let config = AlphaMarketParamsConfig {
+        collateral_factor: 6000,
+        liquidation_threshold: 7000,
+        liquidation_bonus: 800,
+        supply_cap: 1_000_000,
+    };
+    // governance should pass ensure_maintainer (governance || maintainer)
+    pool.set_alpha_params(1, config).unwrap();
+}
+
+#[ink::test]
+fn new_maintainer_can_call_maintainer_functions() {
+    let (mut pool, accounts) = setup_with_alpha(1);
+    set_caller(accounts.alice);
+    // Transfer maintainer to bob
+    pool.update_maintainer(accounts.bob).unwrap();
+    // Bob is now maintainer
+    set_caller(accounts.bob);
+    let config = AlphaMarketParamsConfig {
+        collateral_factor: 6000,
+        liquidation_threshold: 7000,
+        liquidation_bonus: 800,
+        supply_cap: 1_000_000,
+    };
+    pool.set_alpha_params(1, config).unwrap();
+}
+
+#[ink::test]
+fn maintainer_initialized_in_test_constructor() {
+    let (pool, accounts) = setup();
+    // Test the test constructor also initializes maintainer
+    assert_eq!(pool.maintainer(), accounts.alice);
+    assert_eq!(pool.governance(), accounts.alice);
 }

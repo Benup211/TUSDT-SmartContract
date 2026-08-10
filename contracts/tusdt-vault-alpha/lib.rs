@@ -18,7 +18,7 @@ mod vault {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
 
     mod params {
         include!("params.rs");
@@ -450,6 +450,8 @@ mod vault {
         ActiveLiquidationsExist,
         /// Too many netuids passed to `set_vault_hotkey` (max 32).
         TooManyNetuids,
+        /// Cannot remove a netuid that still has active collateral positions.
+        NetuidHasPositions,
     }
 
     pub type Result<T> = core::result::Result<T, Error>;
@@ -860,6 +862,11 @@ mod vault {
             if approved {
                 self.approved_netuids.insert(netuid, &());
             } else {
+                // Refuse removal if any vaults still hold collateral on this netuid.
+                let total = self.netuid_total_collateral.get(netuid).unwrap_or_default();
+                if total > 0 {
+                    return Err(Error::NetuidHasPositions);
+                }
                 self.approved_netuids.remove(netuid);
             }
             Ok(())
@@ -1279,25 +1286,19 @@ mod vault {
             }
 
             // Unstake all alpha collateral to recover TAO into the contract's balance.
+            // Read actual balance change to avoid drift from the formula-based estimate.
             let collateral_amount = vault.collateral_balance;
+            let balance_before = self.env().balance();
             self.env()
                 .extension()
                 .remove_stake(self.vault_hotkey, vault.netuid, collateral_amount)
                 .map_err(|_| Error::TransferFailed)?;
-
-            // Compute how much TAO was actually received from unstaking alpha.
-            // The chain extension's alpha price is RAO per alpha, scaled by 1e9.
-            let alpha_price_rao = self
-                .env()
-                .extension()
-                .get_alpha_price(vault.netuid)
-                .map_err(|_| Error::ChainExtensionFailed)?;
-            let alpha_to_tao = Self::alpha_price_rao_to_ratio(alpha_price_rao)?;
-            let tao_received = alpha_to_tao
-                .checked_mul_value(u128::from(collateral_amount))
-                .ok_or(Error::ArithmeticError)?;
+            let balance_after = self.env().balance();
             let tao_received =
-                Balance::try_from(tao_received).map_err(|_| Error::ArithmeticError)?;
+                balance_after.checked_sub(balance_before).ok_or(Error::ArithmeticError)?;
+            if tao_received == 0 {
+                return Err(Error::TransferFailed);
+            }
 
             // Zero out the vault's collateral immediately — the alpha has been
             // unstaked and the TAO now sits in the contract's balance.

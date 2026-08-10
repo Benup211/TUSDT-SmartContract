@@ -1,4 +1,6 @@
 #![cfg_attr(not(feature = "std"), no_std, no_main)]
+#![allow(clippy::upper_case_acronyms)]
+#![allow(clippy::enum_variant_names)]
 
 pub use self::lending_pool::{
     AlphaMarketParams, AlphaMarketParamsConfig, InterestRateParams, InterestRateParamsConfig,
@@ -18,7 +20,7 @@ mod lending_pool {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
+    pub(crate) const PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
     #[allow(dead_code)]
     pub(crate) const MIN_STAKE: Balance = 100_000;
 
@@ -183,11 +185,51 @@ mod lending_pool {
         pub execute_after: u64,
     }
 
+    // ── Config conversion helpers ──
+
+    impl InterestRateParams {
+        pub fn to_config(&self) -> InterestRateParamsConfig {
+            InterestRateParamsConfig {
+                base_rate: self.base_rate.to_basis_points().unwrap_or(0),
+                slope1: self.slope1.to_basis_points().unwrap_or(0),
+                slope2: self.slope2.to_basis_points().unwrap_or(0),
+                optimal_utilization: self.optimal_utilization.to_basis_points().unwrap_or(0),
+                reserve_factor: self.reserve_factor.to_basis_points().unwrap_or(0),
+            }
+        }
+    }
+
+    impl AlphaMarketParams {
+        pub fn to_config(&self) -> AlphaMarketParamsConfig {
+            AlphaMarketParamsConfig {
+                collateral_factor: self.collateral_factor.to_basis_points().unwrap_or(0),
+                liquidation_threshold: self.liquidation_threshold.to_basis_points().unwrap_or(0),
+                liquidation_bonus: self.liquidation_bonus.to_basis_points().unwrap_or(0),
+                supply_cap: self.supply_cap,
+            }
+        }
+    }
+
+    impl PoolGlobalParams {
+        pub fn to_config(&self) -> PoolGlobalParamsConfig {
+            PoolGlobalParamsConfig {
+                max_oracle_age_ms: self.max_oracle_age_ms,
+                close_factor: self.close_factor.to_basis_points().unwrap_or(0),
+                performance_fee: self.performance_fee.to_basis_points().unwrap_or(0),
+                supply_cap_tao: self.supply_cap_tao,
+                supply_cap_tusdt: self.supply_cap_tusdt,
+                borrow_cap_tao: self.borrow_cap_tao,
+                borrow_cap_tusdt: self.borrow_cap_tusdt,
+            }
+        }
+    }
+
     /// Lending pool storage: roles, market state, user positions, and risk parameters.
     #[ink(storage)]
     pub struct TusdtLendingPool {
         // ── Roles ──
         governance: AccountId,
+        maintainer: AccountId,
         treasury: AccountId,
         platform: AccountId,
         paused: bool,
@@ -483,7 +525,7 @@ mod lending_pool {
     }
 
     #[ink(event)]
-    pub struct OracleAddressUpdated {
+    pub struct PoolOracleAddressUpdated {
         pub previous: AccountId,
         pub new: AccountId,
     }
@@ -495,20 +537,26 @@ mod lending_pool {
     }
 
     #[ink(event)]
-    pub struct Paused {}
+    pub struct PoolPaused {}
 
     #[ink(event)]
-    pub struct Unpaused {}
+    pub struct PoolUnpaused {}
 
     #[ink(event)]
-    pub struct SurplusTusdtClaimed {
+    pub struct PoolSurplusTusdtClaimed {
         pub recipient: AccountId,
         pub amount: Balance,
     }
 
     #[ink(event)]
-    pub struct NativeTransferredToTreasury {
+    pub struct PoolNativeTransferredToTreasury {
         pub amount: Balance,
+    }
+
+    #[ink(event)]
+    pub struct PoolMaintainerUpdated {
+        #[ink(topic)]
+        pub new_maintainer: AccountId,
     }
 
     /// Error types for the lending pool. All variants are fieldless for compact SCALE encoding.
@@ -518,6 +566,7 @@ mod lending_pool {
         // ── Access ──
         NotGovernance,
         NotGovernanceOrPlatform,
+        NotMaintainer,
         ContractPaused,
         Reentrancy,
 
@@ -528,6 +577,7 @@ mod lending_pool {
         InsufficientLTokenBalance,
         SupplyCapExceeded,
         BorrowCapExceeded,
+        BorrowHealthExceeded,
         RepayAmountTooHigh,
 
         // ── Alpha collateral ──
@@ -621,6 +671,7 @@ mod lending_pool {
 
             Self {
                 governance: caller,
+                maintainer: caller,
                 treasury,
                 platform: caller,
                 paused: false,
@@ -678,6 +729,7 @@ mod lending_pool {
 
             Self {
                 governance: caller,
+                maintainer: caller,
                 treasury,
                 platform: caller,
                 paused: false,
@@ -730,6 +782,66 @@ mod lending_pool {
             self.busy = false;
         }
 
+        // ─────────────────────────────────────────────────────────────
+        // Position key lifecycle
+        // ─────────────────────────────────────────────────────────────
+
+        /// Remove all occurrences of a key from `position_keys` by scanning
+        /// backward. On each match we swap the tail element into the match
+        /// slot and pop, so the operation is O(n) but only fires when a
+        /// position becomes all-zeros (rare).
+        pub(crate) fn remove_position_key(&mut self, key: &(u8, AccountId)) {
+            let mut i = self.position_keys.len();
+            while i > 0 {
+                i = i.saturating_sub(1);
+                if self.position_keys.get(i) == Some(*key) {
+                    let last = self.position_keys.len().saturating_sub(1);
+                    if i != last {
+                        if let Some(tail) = self.position_keys.get(last) {
+                            self.position_keys.set(i, &tail);
+                        }
+                    }
+                    self.position_keys.pop();
+                }
+            }
+        }
+
+        /// Maintains the `position_keys` invariant after any position mutation:
+        /// `position_keys` holds exactly one entry per non-zero position.
+        ///
+        /// * If the position is now non-zero → ensure the key is present
+        ///   (pushes if absent; self-heals legacy duplicates by not pushing
+        ///   again when already present).
+        /// * If the position is now all-zeros → remove **all** occurrences
+        ///   of the key (self-heals legacy duplicates).
+        pub(crate) fn update_position_key(&mut self, market_id: u8, user: AccountId) {
+            let key = (market_id, user);
+            let pos = self.positions.get(key).unwrap_or(Position {
+                ltoken_balance: 0,
+                scaled_debt: 0,
+                alpha_principal: 0,
+            });
+            let is_zero =
+                pos.ltoken_balance == 0 && pos.scaled_debt == 0 && pos.alpha_principal == 0;
+
+            if is_zero {
+                self.remove_position_key(&key);
+            } else {
+                // Ensure key is present exactly once — scan first so legacy
+                // duplicates never cause a second push (self-healing).
+                let mut present = false;
+                for i in 0..self.position_keys.len() {
+                    if self.position_keys.get(i) == Some(key) {
+                        present = true;
+                        break;
+                    }
+                }
+                if !present {
+                    self.position_keys.push(&key);
+                }
+            }
+        }
+
         pub(crate) fn ensure_governance(&self) -> Result<()> {
             if self.env().caller() != self.governance {
                 return Err(Error::NotGovernance);
@@ -741,6 +853,14 @@ mod lending_pool {
             let caller = self.env().caller();
             if caller != self.governance && caller != self.platform {
                 return Err(Error::NotGovernanceOrPlatform);
+            }
+            Ok(())
+        }
+
+        pub(crate) fn ensure_maintainer(&self) -> Result<()> {
+            let caller = self.env().caller();
+            if caller != self.maintainer && caller != self.governance {
+                return Err(Error::NotMaintainer);
             }
             Ok(())
         }
@@ -791,7 +911,7 @@ mod lending_pool {
             let params = self.market_params.get(market_id).ok_or(Error::MarketNotFound)?;
             let borrow_rate_annual = Self::compute_borrow_rate(&params, utilization)?;
             let one = Ratio::one();
-            let hours_per_year = Ratio::from_integer(tusdt_primitives::HOURS_PER_YEAR.into());
+            let hours_per_year = Ratio::from_integer(tusdt_primitives::HOURS_PER_YEAR);
             let borrow_rate_hourly = borrow_rate_annual
                 .checked_div_int(hours_per_year.into_inner())
                 .ok_or(Error::ArithmeticError)?;
@@ -822,7 +942,7 @@ mod lending_pool {
                 .and_then(|g| g.checked_mul_value(state.total_supplied.into()))
                 .and_then(|v| Balance::try_from(v).ok())
                 .unwrap_or(0);
-            let reserve_delta = debt_interest.checked_sub(supply_interest).unwrap_or(0);
+            let reserve_delta = debt_interest.saturating_sub(supply_interest);
             state.total_debt = new_debt;
             state.borrow_index =
                 state.borrow_index.checked_mul(borrow_growth).ok_or(Error::ArithmeticError)?;
@@ -892,7 +1012,10 @@ mod lending_pool {
         pub(crate) fn get_oracle_price(&self) -> Result<Ratio> {
             let price_data = self.oracle.get_latest_price().ok_or(Error::OraclePriceUnavailable)?;
             let now = self.env().block_timestamp();
-            let age = now.checked_sub(price_data.committed_at).ok_or(Error::OraclePriceStale)?;
+            if price_data.committed_at > now {
+                return Err(Error::OraclePriceUnavailable);
+            }
+            let age = now.checked_sub(price_data.committed_at).ok_or(Error::ArithmeticError)?;
             if age > self.global_params.max_oracle_age_ms {
                 return Err(Error::OraclePriceStale);
             }
@@ -1244,9 +1367,8 @@ mod lending_pool {
             // Guard is locked; every error path below MUST call set_idle() before returning.
 
             // Accrue interest before any state change
-            self.accrue_interest(0).map_err(|e| {
+            self.accrue_interest(0).inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
 
             // Cap check
@@ -1264,34 +1386,16 @@ mod lending_pool {
             let ltoken_addr = self.ltoken_by_market.get(0).ok_or(Error::MarketNotFound)?;
             let mut ltoken = TusdtErc20Ref::from_account_id(ltoken_addr);
 
-            // Compute lToken amount: amount / exchange_rate (or 1:1 if first supply)
-            let ltoken_scaled = if state.total_supplied == 0 {
+            // Compute lToken amount: amount * ltoken_total_supply / total_supplied
+            let ltoken_supply = ltoken.total_supply();
+            let ltoken_scaled = if ltoken_supply == 0 || state.total_supplied == 0 {
                 amount
             } else {
-                let scaled = Ratio::from_integer(amount.into())
-                    .checked_div_value(state.total_supplied.into())
-                    .and_then(|v| {
-                        Balance::try_from(state.exchange_rate.checked_mul_value(v).unwrap_or(0))
-                            .ok()
-                    })
-                    .unwrap_or(0);
-                if scaled == 0 {
-                    self.set_idle();
-                    return Err(Error::MintBelowPrecision);
-                }
-                // Actually: ltoken = amount * ltoken_total_supply / total_supplied
-                // where ltoken_total_supply = total_supplied / exchange_rate (not exactly)
-                // Simpler: ltoken_scaled = amount * ltoken_erc20.total_supply / total_supplied
-                let ltoken_supply = ltoken.total_supply();
-                if ltoken_supply == 0 || state.total_supplied == 0 {
-                    amount
-                } else {
-                    Ratio::from_integer(amount.into())
-                        .checked_mul_value(ltoken_supply.into())
-                        .and_then(|v| Balance::try_from(v).ok())
-                        .and_then(|v| v.checked_div(state.total_supplied))
-                        .unwrap_or(0)
-                }
+                Ratio::from_integer(amount.into())
+                    .checked_mul_value(ltoken_supply.into())
+                    .and_then(|v| Balance::try_from(v).ok())
+                    .and_then(|v| v.checked_div(state.total_supplied))
+                    .unwrap_or(0)
             };
             if ltoken_scaled == 0 {
                 self.set_idle();
@@ -1310,13 +1414,10 @@ mod lending_pool {
                 scaled_debt: 0,
                 alpha_principal: 0,
             });
-            let had_position = pos.ltoken_balance > 0 || pos.scaled_debt > 0;
             pos.ltoken_balance =
                 pos.ltoken_balance.checked_add(ltoken_scaled).ok_or(Error::ArithmeticError)?;
             self.positions.insert((0, caller), &pos);
-            if !had_position {
-                self.position_keys.push(&(0, caller));
-            }
+            self.update_position_key(0, caller);
 
             // Mint lTokens
             ltoken.mint(caller, ltoken_scaled).map_err(|_| Error::LTokenCallFailed)?;
@@ -1348,7 +1449,9 @@ mod lending_pool {
             }
 
             self.ensure_idle()?;
-            self.accrue_interest(1)?;
+            self.accrue_interest(1).inspect_err(|_| {
+                self.set_idle();
+            })?;
 
             // Cap check
             if self.global_params.supply_cap_tusdt > 0 {
@@ -1400,13 +1503,10 @@ mod lending_pool {
                 scaled_debt: 0,
                 alpha_principal: 0,
             });
-            let had_position = pos.ltoken_balance > 0 || pos.scaled_debt > 0;
             pos.ltoken_balance =
                 pos.ltoken_balance.checked_add(ltoken_scaled).ok_or(Error::ArithmeticError)?;
             self.positions.insert((1, caller), &pos);
-            if !had_position {
-                self.position_keys.push(&(1, caller));
-            }
+            self.update_position_key(1, caller);
 
             // Mint lTokens
             ltoken.mint(caller, ltoken_scaled).map_err(|_| Error::LTokenCallFailed)?;
@@ -1432,7 +1532,9 @@ mod lending_pool {
 
             self.ensure_idle()?;
 
-            self.accrue_interest(0)?;
+            self.accrue_interest(0).inspect_err(|_| {
+                self.set_idle();
+            })?;
 
             let caller = self.env().caller();
             let state = self.markets.get(0).ok_or(Error::MarketNotFound)?;
@@ -1473,22 +1575,8 @@ mod lending_pool {
                 return Err(Error::LiquidityInsufficient);
             }
 
-            // If user has debt, check health after withdrawal
-            let tao_pos = self.positions.get((0, caller)).unwrap_or(Position {
-                ltoken_balance: 0,
-                scaled_debt: 0,
-                alpha_principal: 0,
-            });
-            if tao_pos.scaled_debt > 0 {
-                let debt_value = self.get_debt_value_tusdt(caller)?;
-                if debt_value > 0 {
-                    self.set_idle();
-                    // TAO supply is not collateral — withdrawing TAO doesn't reduce collateral,
-                    // so as long as health check passes, allow it.
-                    // But TAO supply != collateral, so no health check needed for TAO withdrawal.
-                    // Actually per the requirements, TAO supply is NOT collateral — skip health check.
-                }
-            }
+            // Note: TAO supply is NOT collateral, so no health check is needed here.
+            // Only alpha collateral positions affect borrow health.
 
             // Effects: burn lTokens, update market state
             ltoken.burn(caller, ltoken_amount).map_err(|_| Error::LTokenCallFailed)?;
@@ -1506,6 +1594,7 @@ mod lending_pool {
             pos.ltoken_balance =
                 pos.ltoken_balance.checked_sub(ltoken_amount).ok_or(Error::ArithmeticError)?;
             self.positions.insert((0, caller), &pos);
+            self.update_position_key(0, caller);
 
             // Transfer TAO
             self.env().transfer(caller, underlying).map_err(|_| Error::TransferFailed)?;
@@ -1530,9 +1619,8 @@ mod lending_pool {
             }
 
             self.ensure_idle()?;
-            self.accrue_interest(1).map_err(|e| {
+            self.accrue_interest(1).inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
 
             let caller = self.env().caller();
@@ -1587,6 +1675,7 @@ mod lending_pool {
             pos.ltoken_balance =
                 pos.ltoken_balance.checked_sub(ltoken_amount).ok_or(Error::ArithmeticError)?;
             self.positions.insert((1, caller), &pos);
+            self.update_position_key(1, caller);
 
             self.tusdt.transfer(caller, underlying).map_err(|_| Error::TokenContractCallFailed)?;
 
@@ -1614,7 +1703,9 @@ mod lending_pool {
             }
 
             self.ensure_idle()?;
-            self.accrue_interest(0)?;
+            self.accrue_interest(0).inspect_err(|_| {
+                self.set_idle();
+            })?;
 
             let caller = self.env().caller();
 
@@ -1637,9 +1728,8 @@ mod lending_pool {
             }
 
             // Health check: convert borrow amount to TUSDT equivalent
-            let tusdt_per_tao = self.get_oracle_price().map_err(|e| {
+            let tusdt_per_tao = self.get_oracle_price().inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
             let borrow_value_tusdt = tusdt_per_tao
                 .checked_mul_value(amount.into())
@@ -1649,7 +1739,7 @@ mod lending_pool {
             let available = self.get_available_borrow_tusdt(caller)?;
             if borrow_value_tusdt > available {
                 self.set_idle();
-                return Err(Error::BorrowCapExceeded);
+                return Err(Error::BorrowHealthExceeded);
             }
 
             // Effects
@@ -1671,6 +1761,7 @@ mod lending_pool {
             });
             pos.scaled_debt = pos.scaled_debt.checked_add(scaled).ok_or(Error::ArithmeticError)?;
             self.positions.insert((0, caller), &pos);
+            self.update_position_key(0, caller);
 
             // Transfer TAO to borrower
             self.env().transfer(caller, amount).map_err(|_| Error::TransferFailed)?;
@@ -1690,7 +1781,9 @@ mod lending_pool {
             }
 
             self.ensure_idle()?;
-            self.accrue_interest(1)?;
+            self.accrue_interest(1).inspect_err(|_| {
+                self.set_idle();
+            })?;
 
             let caller = self.env().caller();
 
@@ -1716,7 +1809,7 @@ mod lending_pool {
             let available = self.get_available_borrow_tusdt(caller)?;
             if amount > available {
                 self.set_idle();
-                return Err(Error::BorrowCapExceeded);
+                return Err(Error::BorrowHealthExceeded);
             }
 
             // Effects
@@ -1738,6 +1831,7 @@ mod lending_pool {
             });
             pos.scaled_debt = pos.scaled_debt.checked_add(scaled).ok_or(Error::ArithmeticError)?;
             self.positions.insert((1, caller), &pos);
+            self.update_position_key(1, caller);
 
             // Transfer TUSDT to borrower
             self.tusdt.transfer(caller, amount).map_err(|_| Error::TokenContractCallFailed)?;
@@ -1754,9 +1848,8 @@ mod lending_pool {
             self.ensure_not_paused()?;
 
             self.ensure_idle()?;
-            self.accrue_interest(0).map_err(|e| {
+            self.accrue_interest(0).inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
 
             let caller = self.env().caller();
@@ -1810,6 +1903,7 @@ mod lending_pool {
             pos.scaled_debt =
                 pos.scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
             self.positions.insert((0, caller), &pos);
+            self.update_position_key(0, caller);
 
             // Note: repaid TAO stays in pool as cash — no burn.
 
@@ -1825,9 +1919,8 @@ mod lending_pool {
             self.ensure_not_paused()?;
 
             self.ensure_idle()?;
-            self.accrue_interest(1).map_err(|e| {
+            self.accrue_interest(1).inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
 
             let caller = self.env().caller();
@@ -1875,6 +1968,7 @@ mod lending_pool {
             pos.scaled_debt =
                 pos.scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
             self.positions.insert((1, caller), &pos);
+            self.update_position_key(1, caller);
 
             self.env().emit_event(Repaid { market: 1, user: caller, amount: repay_amount });
 
@@ -1933,13 +2027,10 @@ mod lending_pool {
                 scaled_debt: 0,
                 alpha_principal: 0,
             });
-            let had_position = pos.alpha_principal > 0;
             pos.alpha_principal =
                 pos.alpha_principal.checked_add(amount).ok_or(Error::ArithmeticError)?;
             self.positions.insert((market_id, caller), &pos);
-            if !had_position {
-                self.position_keys.push(&(market_id, caller));
-            }
+            self.update_position_key(market_id, caller);
 
             let current = self.netuid_total_collateral.get(netuid).unwrap_or_default();
             self.netuid_total_collateral
@@ -2046,6 +2137,7 @@ mod lending_pool {
             pos.alpha_principal =
                 pos.alpha_principal.checked_sub(amount).ok_or(Error::ArithmeticError)?;
             self.positions.insert((market_id, caller), &pos);
+            self.update_position_key(market_id, caller);
 
             let current = self.netuid_total_collateral.get(netuid).unwrap_or_default();
             self.netuid_total_collateral
@@ -2093,8 +2185,8 @@ mod lending_pool {
             debt_to_cover: Balance,
             collateral_netuid: u16,
         ) -> Result<()> {
-            self.ensure_idle()?;
             self.ensure_not_paused()?;
+            self.ensure_idle()?;
 
             if debt_market > 1 {
                 self.set_idle();
@@ -2105,13 +2197,14 @@ mod lending_pool {
                 return Err(Error::ZeroAmount);
             }
 
-            self.ensure_approved_netuid(collateral_netuid).map_err(|e| {
+            self.ensure_approved_netuid(collateral_netuid).inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
 
             // Accrue interest on the debt market
-            self.accrue_interest(debt_market)?;
+            self.accrue_interest(debt_market).inspect_err(|_| {
+                self.set_idle();
+            })?;
 
             let liquidator = self.env().caller();
 
@@ -2122,13 +2215,11 @@ mod lending_pool {
             }
 
             // Get pricing
-            let tusdt_per_tao = self.get_oracle_price().map_err(|e| {
+            let tusdt_per_tao = self.get_oracle_price().inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
-            let collateral_price = self.collateral_price(collateral_netuid).map_err(|e| {
+            let collateral_price = self.collateral_price(collateral_netuid).inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
 
             // Compute borrower's total debt value and apply close factor
@@ -2250,6 +2341,7 @@ mod lending_pool {
             pos.scaled_debt =
                 pos.scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
             self.positions.insert((debt_market, borrower), &pos);
+            self.update_position_key(debt_market, borrower);
 
             // 2. Reduce borrower alpha collateral
             let mut collateral_pos = collateral_pos;
@@ -2258,6 +2350,7 @@ mod lending_pool {
                 .checked_sub(alpha_principal_to_seize)
                 .ok_or(Error::ArithmeticError)?;
             self.positions.insert((collateral_market_id, borrower), &collateral_pos);
+            self.update_position_key(collateral_market_id, borrower);
 
             let netuid_collateral =
                 self.netuid_total_collateral.get(collateral_netuid).unwrap_or_default();
@@ -2306,7 +2399,7 @@ mod lending_pool {
                 collateral_netuid,
                 debt_market,
                 debt_covered: actual_debt_units,
-                collateral_alpha: alpha_principal_to_seize,
+                collateral_alpha: alpha_to_seize,
                 liquidator,
             });
 
@@ -2324,9 +2417,8 @@ mod lending_pool {
         #[ink(message)]
         pub fn claim_alpha_yield(&mut self, netuid: u16) -> Result<()> {
             self.ensure_idle()?;
-            self.ensure_approved_netuid(netuid).map_err(|e| {
+            self.ensure_approved_netuid(netuid).inspect_err(|_| {
                 self.set_idle();
-                e
             })?;
 
             // Get actual available stake
@@ -2362,7 +2454,7 @@ mod lending_pool {
                 .checked_mul_value(excess.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .unwrap_or(0);
-            let credited = excess.checked_sub(fee_alpha).unwrap_or(0);
+            let credited = excess.saturating_sub(fee_alpha);
 
             let tao_received = if fee_alpha > 0 {
                 let balance_before = self.env().balance();
@@ -2420,7 +2512,9 @@ mod lending_pool {
         pub fn claim_reserve(&mut self, market_id: u8) -> Result<()> {
             self.ensure_idle()?;
 
-            self.accrue_interest(market_id)?;
+            self.accrue_interest(market_id).inspect_err(|_| {
+                self.set_idle();
+            })?;
 
             let mut state = self.markets.get(market_id).ok_or(Error::MarketNotFound)?;
             let claimable = state.reserve_accrued;
@@ -2465,7 +2559,7 @@ mod lending_pool {
         /// Adds or removes a subnet from the approved alpha markets list.
         #[ink(message)]
         pub fn set_approved_netuid(&mut self, netuid: u16, approved: bool) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
 
             if approved {
                 if self.netuid_to_market.get(netuid).is_some() {
@@ -2506,7 +2600,7 @@ mod lending_pool {
             netuid: u16,
             config: AlphaMarketParamsConfig,
         ) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             self.ensure_approved_netuid(netuid)?;
 
             let params = Self::alpha_params_from_config(config)?;
@@ -2544,7 +2638,7 @@ mod lending_pool {
         /// Cancels a scheduled alpha params update.
         #[ink(message)]
         pub fn cancel_alpha_params_update(&mut self, netuid: u16) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             if self.pending_alpha_params.get(netuid).is_none() {
                 return Err(Error::NoPendingAlphaParamsUpdate);
             }
@@ -2563,7 +2657,7 @@ mod lending_pool {
             market_id: u8,
             config: InterestRateParamsConfig,
         ) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             if market_id > 1 {
                 return Err(Error::MarketNotFound);
             }
@@ -2601,7 +2695,7 @@ mod lending_pool {
 
         #[ink(message)]
         pub fn cancel_market_params_update(&mut self, market_id: u8) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             if self.pending_market_params.get(market_id).is_none() {
                 return Err(Error::NoPendingMarketParamsUpdate);
             }
@@ -2616,7 +2710,7 @@ mod lending_pool {
 
         #[ink(message)]
         pub fn set_global_params(&mut self, config: PoolGlobalParamsConfig) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             let params = Self::global_params_from_config(config)?;
             Self::validate_global_params(&params)?;
 
@@ -2648,7 +2742,7 @@ mod lending_pool {
 
         #[ink(message)]
         pub fn cancel_global_params_update(&mut self) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             if self.pending_global_params.is_none() {
                 return Err(Error::NoPendingGlobalParamsUpdate);
             }
@@ -2671,6 +2765,19 @@ mod lending_pool {
         }
 
         #[ink(message)]
+        pub fn update_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
+            self.ensure_governance()?;
+            self.maintainer = new_maintainer;
+            self.env().emit_event(PoolMaintainerUpdated { new_maintainer });
+            Ok(())
+        }
+
+        #[ink(message)]
+        pub fn maintainer(&self) -> AccountId {
+            self.maintainer
+        }
+
+        #[ink(message)]
         pub fn update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
             self.ensure_governance()?;
             let previous = self.treasury;
@@ -2681,7 +2788,7 @@ mod lending_pool {
 
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             let previous = self.platform;
             self.platform = new_platform;
             self.env().emit_event(PoolPlatformUpdated { previous, new: new_platform });
@@ -2690,10 +2797,10 @@ mod lending_pool {
 
         #[ink(message)]
         pub fn update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             let previous = self.oracle.to_account_id();
             self.oracle = TusdtOracleRef::from_account_id(new_oracle);
-            self.env().emit_event(OracleAddressUpdated { previous, new: new_oracle });
+            self.env().emit_event(PoolOracleAddressUpdated { previous, new: new_oracle });
             Ok(())
         }
 
@@ -2703,7 +2810,7 @@ mod lending_pool {
             market_id: u8,
             new_ltoken: AccountId,
         ) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             let old = self.ltoken_by_market.get(market_id).ok_or(Error::MarketNotFound)?;
             self.ltoken_by_market.insert(market_id, &new_ltoken);
             self.env().emit_event(LTokenAddressUpdated {
@@ -2721,7 +2828,7 @@ mod lending_pool {
             new_hotkey: AccountId,
             netuids: Vec<u16>,
         ) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             if netuids.len() > 32 {
                 return Err(Error::TooManyNetuids);
             }
@@ -2748,15 +2855,15 @@ mod lending_pool {
         pub fn pause(&mut self) -> Result<()> {
             self.ensure_governance_or_platform()?;
             self.paused = true;
-            self.env().emit_event(Paused {});
+            self.env().emit_event(PoolPaused {});
             Ok(())
         }
 
         #[ink(message)]
         pub fn unpause(&mut self) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             self.paused = false;
-            self.env().emit_event(Unpaused {});
+            self.env().emit_event(PoolUnpaused {});
             Ok(())
         }
 
@@ -2766,24 +2873,24 @@ mod lending_pool {
 
         #[ink(message)]
         pub fn claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             self.tusdt
                 .transfer(self.treasury, amount)
                 .map_err(|_| Error::TokenContractCallFailed)?;
-            self.env().emit_event(SurplusTusdtClaimed { recipient: self.treasury, amount });
+            self.env().emit_event(PoolSurplusTusdtClaimed { recipient: self.treasury, amount });
             Ok(())
         }
 
         #[ink(message)]
         pub fn transfer_native_to_treasury(&mut self) -> Result<()> {
-            self.ensure_governance()?;
+            self.ensure_maintainer()?;
             let balance = self.env().balance();
             if balance <= 1 {
                 return Ok(()); // keep 1 as existential deposit guard
             }
             let amount = balance.checked_sub(1).ok_or(Error::ArithmeticError)?;
             self.env().transfer(self.treasury, amount).map_err(|_| Error::TransferFailed)?;
-            self.env().emit_event(NativeTransferredToTreasury { amount });
+            self.env().emit_event(PoolNativeTransferredToTreasury { amount });
             Ok(())
         }
 
@@ -2937,6 +3044,7 @@ mod lending_pool {
         #[ink(message)]
         pub fn get_positions(&self, user: AccountId, page: u32) -> Vec<(u8, Position)> {
             let mut result = Vec::new();
+            let mut seen = Vec::new();
             let total = self.position_keys.len();
             let start = page.saturating_mul(PAGE_SIZE);
             let end = min(start.saturating_add(PAGE_SIZE), total);
@@ -2948,6 +3056,10 @@ mod lending_pool {
                 if key.1 != user {
                     continue;
                 }
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.push(key);
                 if let Some(pos) = self.positions.get(key) {
                     result.push((key.0, pos));
                 }
@@ -2958,6 +3070,7 @@ mod lending_pool {
         #[ink(message)]
         pub fn get_all_positions(&self, page: u32) -> Vec<((u8, AccountId), Position)> {
             let mut result = Vec::new();
+            let mut seen = Vec::new();
             let total = self.position_keys.len();
             let start = page.saturating_mul(PAGE_SIZE);
             let end = min(start.saturating_add(PAGE_SIZE), total);
@@ -2966,6 +3079,10 @@ mod lending_pool {
                     Some(k) => k,
                     None => continue,
                 };
+                if seen.contains(&key) {
+                    continue;
+                }
+                seen.push(key);
                 if let Some(pos) = self.positions.get(key) {
                     result.push((key, pos));
                 }
@@ -3037,6 +3154,21 @@ mod lending_pool {
         pub fn get_pool_hotkey(&self) -> AccountId {
             self.pool_hotkey
         }
+
+        #[ink(message)]
+        pub fn get_global_params(&self) -> PoolGlobalParamsConfig {
+            self.global_params.to_config()
+        }
+
+        #[ink(message)]
+        pub fn get_market_params(&self, market_id: u8) -> Option<InterestRateParamsConfig> {
+            self.market_params.get(market_id).map(|p| p.to_config())
+        }
+
+        #[ink(message)]
+        pub fn get_alpha_params(&self, netuid: u16) -> Option<AlphaMarketParamsConfig> {
+            self.alpha_params.get(netuid).map(|p| p.to_config())
+        }
     }
 
     #[cfg(test)]
@@ -3066,6 +3198,7 @@ mod lending_pool {
 
             Self {
                 governance,
+                maintainer: governance,
                 treasury: governance,
                 platform: governance,
                 paused: false,
@@ -3090,6 +3223,17 @@ mod lending_pool {
                 positions: Mapping::default(),
                 position_keys: StorageVec::new(),
             }
+        }
+
+        /// Test-only: directly set a position in the mapping.
+        pub(crate) fn debug_set_position(&mut self, market_id: u8, user: AccountId, pos: Position) {
+            self.positions.insert((market_id, user), &pos);
+        }
+
+        /// Test-only: push a key into position_keys (simulates legacy
+        /// append-only behaviour for testing dedup and self-healing).
+        pub(crate) fn debug_push_position_key(&mut self, market_id: u8, user: AccountId) {
+            self.position_keys.push(&(market_id, user));
         }
     }
 }

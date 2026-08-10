@@ -247,4 +247,162 @@ impl TusdtGovernance {
             .set_admin(admin)
             .map_err(|_| Error::AuctionCallFailed)
     }
+
+    // ----- Lending Pool: maintainer-gated (governing/config) -----
+
+    pub(crate) fn forward_pool_set_approved_netuid(
+        &mut self,
+        netuid: u16,
+        approved: bool,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .set_approved_netuid(netuid, approved)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_set_alpha_params(
+        &mut self,
+        netuid: u16,
+        config: AlphaMarketParamsConfig,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .set_alpha_params(netuid, config)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_cancel_alpha_params_update(
+        &mut self,
+        netuid: u16,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .cancel_alpha_params_update(netuid)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_set_market_params(
+        &mut self,
+        market_id: u8,
+        config: InterestRateParamsConfig,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .set_market_params(market_id, config)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_cancel_market_params_update(
+        &mut self,
+        market_id: u8,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .cancel_market_params_update(market_id)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_set_global_params(
+        &mut self,
+        config: PoolGlobalParamsConfig,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .set_global_params(config)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_cancel_global_params_update(&mut self) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .cancel_global_params_update()
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_update_platform(
+        &mut self,
+        new_platform: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .update_platform(new_platform)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_update_treasury(
+        &mut self,
+        new_treasury: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .update_treasury(new_treasury)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_update_oracle_address(
+        &mut self,
+        new_oracle: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .update_oracle_address(new_oracle)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_update_ltoken_address(
+        &mut self,
+        market_id: u8,
+        new_ltoken: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .update_ltoken_address(market_id, new_ltoken)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_update_pool_hotkey(
+        &mut self,
+        new_hotkey: AccountId,
+        netuids: Vec<u16>,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .update_pool_hotkey(new_hotkey, netuids)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_claim_surplus_tusdt(
+        &mut self,
+        amount: Balance,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .claim_surplus_tusdt(amount)
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_transfer_native_to_treasury(&mut self) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .transfer_native_to_treasury()
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_unpause(&mut self) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .unpause()
+            .map_err(|_| Error::PoolCallFailed)
+    }
+
+    pub(crate) fn forward_pool_update_maintainer(
+        &mut self,
+        new_maintainer: AccountId,
+    ) -> Result<()> {
+        self.ensure_maintainer()?;
+        self.pool
+            .update_maintainer(new_maintainer)
+            .map_err(|_| Error::PoolCallFailed)
+    }
 }
