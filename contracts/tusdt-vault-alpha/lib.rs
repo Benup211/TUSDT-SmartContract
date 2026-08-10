@@ -342,6 +342,14 @@ mod vault {
         amount: Balance,
     }
 
+    /// Emitted when a netuid is added to or removed from the approved collateral set.
+    #[ink(event)]
+    pub struct NetuidApproved {
+        #[ink(topic)]
+        netuid: u16,
+        approved: bool,
+    }
+
     /// Emitted when a liquidation auction is created for an underwater vault.
     #[ink(event)]
     pub struct LiquidationAuctionCreated {
@@ -869,6 +877,7 @@ mod vault {
                 }
                 self.approved_netuids.remove(netuid);
             }
+            self.env().emit_event(NetuidApproved { netuid, approved });
             Ok(())
         }
 
@@ -1005,9 +1014,10 @@ mod vault {
             self.ensure_no_active_liquidations()?;
 
             let balance = self.env().balance();
-            // Keep 1 unit of native balance as existential deposit guard so the
-            // contract account is never reaped.
-            let transfer_amount = balance.saturating_sub(1);
+            // Reserve the chain's existential deposit to prevent the contract
+            // account from being reaped.
+            let ed = self.env().minimum_balance();
+            let transfer_amount = balance.saturating_sub(ed);
             if transfer_amount > 0 {
                 self.env()
                     .transfer(self.treasury, transfer_amount)
@@ -1668,7 +1678,10 @@ mod vault {
             max_oracle_age_ms: u64,
         ) -> Result<PriceData> {
             let price_data = price_data.ok_or(Error::OraclePriceUnavailable)?;
-            let age = now.checked_sub(price_data.committed_at).ok_or(Error::OraclePriceStale)?;
+            if price_data.committed_at > now {
+                return Err(Error::OraclePriceUnavailable);
+            }
+            let age = now.checked_sub(price_data.committed_at).ok_or(Error::ArithmeticError)?;
             if age > max_oracle_age_ms {
                 return Err(Error::OraclePriceStale);
             }
