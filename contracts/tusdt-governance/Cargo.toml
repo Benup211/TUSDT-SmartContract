@@ -22,6 +22,7 @@ tusdt-oracle = { path = "../tusdt-oracle", default-features = false, features = 
 tusdt-election = { path = "../tusdt-election", default-features = false, features = [
     "ink-as-dependency",
 ] }
+tusdt-lending-pool = { path = "../tusdt-lending-pool", default-features = false, features = ["ink-as-dependency"] }
 tusdt-primitives = { path = "../../primitives", default-features = false }
 tusdt-voting = { path = "../../voting", default-features = false }
 
@@ -41,6 +42,7 @@ std = [
     "tusdt-auction/std",
     "tusdt-oracle/std",
     "tusdt-election/std",
+    "tusdt-lending-pool/std",
     "tusdt-primitives/std",
     "tusdt-voting/std",
 ]

@@ -3,9 +3,9 @@
 #![allow(clippy::type_complexity)]
 
 pub use self::governance::{
-    CouncilSet, GovernanceParams, MaintainerChanged, Proposal, ProposalExecuted, ProposalFinalized,
-    ProposalKind, ProposalStatus, ProposalSubmitted, Snapshot, SnapshotSubmitted, TusdtGovernance,
-    TusdtGovernanceRef, Voted,
+    CouncilSet, GovernanceParams, MaintainerChanged, PoolAddressUpdated, Proposal,
+    ProposalExecuted, ProposalFinalized, ProposalKind, ProposalStatus, ProposalSubmitted, Snapshot,
+    SnapshotSubmitted, TusdtGovernance, TusdtGovernanceRef, Voted,
 };
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
@@ -16,6 +16,10 @@ mod governance {
     use ink::{env::call::FromAccountId, ToAccountId};
     use tusdt_auction::TusdtAuctionRef;
     use tusdt_election::TusdtElectionRef;
+    use tusdt_lending_pool::{
+        AlphaMarketParamsConfig, InterestRateParamsConfig, PoolGlobalParamsConfig,
+        TusdtLendingPoolRef,
+    };
     use tusdt_oracle::{PriceData, TusdtOracleRef};
     use tusdt_primitives::Ratio;
     use tusdt_treasury::{Fund, TokenKind, TusdtTreasuryRef};
@@ -164,6 +168,7 @@ mod governance {
         vault: TusdtVaultAlphaRef,
         auction: TusdtAuctionRef,
         oracle: TusdtOracleRef,
+        pool: TusdtLendingPoolRef,
         /// The subnet whose alpha stake gates proposer eligibility. Bound to the elected maintainer
         /// (the subnet they govern) — only the election contract changes it, via [`TusdtGovernance::election_set_netuid`].
         netuid: u16,
@@ -252,6 +257,15 @@ mod governance {
         new_vault: AccountId,
     }
 
+    /// Emitted when the stored lending pool contract address is updated by the maintainer.
+    #[ink(event)]
+    pub struct PoolAddressUpdated {
+        #[ink(topic)]
+        old_pool: AccountId,
+        #[ink(topic)]
+        new_pool: AccountId,
+    }
+
     /// Emitted when the stored auction contract address is updated by the maintainer.
     #[ink(event)]
     pub struct GovernanceAuctionUpdated {
@@ -306,6 +320,7 @@ mod governance {
         TreasuryCallFailed,
         VaultCallFailed,
         AuctionCallFailed,
+        PoolCallFailed,
         OracleCallFailed,
         /// Cross-contract call to the vault's token-controller transfer failed.
         VaultTokenCallFailed,
@@ -375,6 +390,7 @@ mod governance {
                 treasury: TusdtTreasuryRef::from_account_id(treasury_address),
                 vault: TusdtVaultAlphaRef::from_account_id(vault_address),
                 auction: TusdtAuctionRef::from_account_id(auction_address),
+                pool: TusdtLendingPoolRef::from_account_id([0u8; 32].into()),
                 oracle: TusdtOracleRef::from_account_id(oracle_address),
                 netuid: DEFAULT_NETUID,
                 params: GovernanceParams::default_params(),
@@ -470,6 +486,22 @@ mod governance {
             self.vault = TusdtVaultAlphaRef::from_account_id(new_vault);
             self.env().emit_event(VaultAddressUpdated { old_vault, new_vault });
             Ok(())
+        }
+
+        /// Updates the stored lending pool contract address. Maintainer-only.
+        #[ink(message)]
+        pub fn update_pool_address(&mut self, new_pool: AccountId) -> Result<()> {
+            self.ensure_maintainer()?;
+            let old_pool = self.pool.to_account_id();
+            self.pool = TusdtLendingPoolRef::from_account_id(new_pool);
+            self.env().emit_event(PoolAddressUpdated { old_pool, new_pool });
+            Ok(())
+        }
+
+        /// Returns the stored lending pool address.
+        #[ink(message)]
+        pub fn pool_address(&self) -> AccountId {
+            self.pool.to_account_id()
         }
 
         /// Updates the stored auction contract address. Maintainer-only.
@@ -664,6 +696,104 @@ mod governance {
         #[ink(message)]
         pub fn auction_set_admin(&mut self, admin: Option<AccountId>) -> Result<()> {
             self.forward_auction_set_admin(admin)
+        }
+
+        // ----- Lending Pool: maintainer-gated (governing/config) -----
+
+        #[ink(message)]
+        pub fn pool_set_approved_netuid(&mut self, netuid: u16, approved: bool) -> Result<()> {
+            self.forward_pool_set_approved_netuid(netuid, approved)
+        }
+
+        #[ink(message)]
+        pub fn pool_set_alpha_params(
+            &mut self,
+            netuid: u16,
+            config: AlphaMarketParamsConfig,
+        ) -> Result<()> {
+            self.forward_pool_set_alpha_params(netuid, config)
+        }
+
+        #[ink(message)]
+        pub fn pool_cancel_alpha_params_update(&mut self, netuid: u16) -> Result<()> {
+            self.forward_pool_cancel_alpha_params_update(netuid)
+        }
+
+        #[ink(message)]
+        pub fn pool_set_market_params(
+            &mut self,
+            market_id: u8,
+            config: InterestRateParamsConfig,
+        ) -> Result<()> {
+            self.forward_pool_set_market_params(market_id, config)
+        }
+
+        #[ink(message)]
+        pub fn pool_cancel_market_params_update(&mut self, market_id: u8) -> Result<()> {
+            self.forward_pool_cancel_market_params_update(market_id)
+        }
+
+        #[ink(message)]
+        pub fn pool_set_global_params(&mut self, config: PoolGlobalParamsConfig) -> Result<()> {
+            self.forward_pool_set_global_params(config)
+        }
+
+        #[ink(message)]
+        pub fn pool_cancel_global_params_update(&mut self) -> Result<()> {
+            self.forward_pool_cancel_global_params_update()
+        }
+
+        #[ink(message)]
+        pub fn pool_update_platform(&mut self, new_platform: AccountId) -> Result<()> {
+            self.forward_pool_update_platform(new_platform)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
+            self.forward_pool_update_treasury(new_treasury)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
+            self.forward_pool_update_oracle_address(new_oracle)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_ltoken_address(
+            &mut self,
+            market_id: u8,
+            new_ltoken: AccountId,
+        ) -> Result<()> {
+            self.forward_pool_update_ltoken_address(market_id, new_ltoken)
+        }
+
+        #[ink(message)]
+        pub fn pool_update_pool_hotkey(
+            &mut self,
+            new_hotkey: AccountId,
+            netuids: Vec<u16>,
+        ) -> Result<()> {
+            self.forward_pool_update_pool_hotkey(new_hotkey, netuids)
+        }
+
+        #[ink(message)]
+        pub fn pool_claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
+            self.forward_pool_claim_surplus_tusdt(amount)
+        }
+
+        #[ink(message)]
+        pub fn pool_transfer_native_to_treasury(&mut self) -> Result<()> {
+            self.forward_pool_transfer_native_to_treasury()
+        }
+
+        #[ink(message)]
+        pub fn pool_unpause(&mut self) -> Result<()> {
+            self.forward_pool_unpause()
+        }
+
+        #[ink(message)]
+        pub fn pool_update_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
+            self.forward_pool_update_maintainer(new_maintainer)
         }
 
         /// Returns the current governance parameters.
