@@ -1393,8 +1393,8 @@ mod lending_pool {
             } else {
                 Ratio::from_integer(amount.into())
                     .checked_mul_value(ltoken_supply.into())
-                    .and_then(|v| Balance::try_from(v).ok())
-                    .and_then(|v| v.checked_div(state.total_supplied))
+                    .and_then(|v| v.checked_div(state.total_supplied as u128))
+                    .and_then(|v| u64::try_from(v).ok())
                     .unwrap_or(0)
             };
             if ltoken_scaled == 0 {
@@ -1483,8 +1483,8 @@ mod lending_pool {
             } else {
                 Ratio::from_integer(amount.into())
                     .checked_mul_value(ltoken_supply.into())
-                    .and_then(|v| Balance::try_from(v).ok())
-                    .and_then(|v| v.checked_div(state.total_supplied))
+                    .and_then(|v| v.checked_div(state.total_supplied as u128))
+                    .and_then(|v| u64::try_from(v).ok())
                     .unwrap_or(0)
             };
             if ltoken_scaled == 0 {
@@ -1559,8 +1559,8 @@ mod lending_pool {
             } else {
                 Ratio::from_integer(ltoken_amount.into())
                     .checked_mul_value(state.total_supplied.into())
-                    .and_then(|v| Balance::try_from(v).ok())
-                    .and_then(|v| v.checked_div(ltoken_supply))
+                    .and_then(|v| v.checked_div(ltoken_supply as u128))
+                    .and_then(|v| u64::try_from(v).ok())
                     .unwrap_or(0)
             };
             if underlying == 0 {
@@ -1644,8 +1644,8 @@ mod lending_pool {
             } else {
                 Ratio::from_integer(ltoken_amount.into())
                     .checked_mul_value(state.total_supplied.into())
-                    .and_then(|v| Balance::try_from(v).ok())
-                    .and_then(|v| v.checked_div(ltoken_supply))
+                    .and_then(|v| v.checked_div(ltoken_supply as u128))
+                    .and_then(|v| u64::try_from(v).ok())
                     .unwrap_or(0)
             };
             if underlying == 0 {
@@ -2962,8 +2962,8 @@ mod lending_pool {
             }
             Ratio::from_integer(pos.ltoken_balance.into())
                 .checked_mul_value(state.total_supplied.into())
-                .and_then(|v| Balance::try_from(v).ok())
-                .and_then(|v| v.checked_div(ltoken_supply))
+                .and_then(|v| v.checked_div(ltoken_supply as u128))
+                .and_then(|v| u64::try_from(v).ok())
         }
 
         #[ink(message)]
