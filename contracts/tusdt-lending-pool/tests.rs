@@ -1496,3 +1496,36 @@ fn maintainer_initialized_in_test_constructor() {
     assert_eq!(pool.maintainer(), accounts.alice);
     assert_eq!(pool.governance(), accounts.alice);
 }
+
+// ---------------------------------------------------------------------------
+// Borrow/repay scaling regression tests
+// ---------------------------------------------------------------------------
+
+#[ink::test]
+fn borrow_scaling_divides_amount_by_borrow_index() {
+    // scaled_debt = amount / borrow_index.
+    // Regression: the operands were previously reversed, computing
+    // borrow_index / amount — borrowing 10 TUSDT stored 0.1 TUSDT of
+    // scaled debt and repayments underflowed into ArithmeticError.
+    let amount: u128 = 10_000_000_000; // 10 TUSDT (9 decimals)
+    let index_one = Ratio::from_inner(1_000_000_000_000_000_000); // 1.0
+
+    let scaled = index_one
+        .checked_div_value(amount)
+        .expect("scaling must not overflow");
+    assert_eq!(scaled, amount, "index 1.0 → scaled == amount");
+
+    // With index = 2.0, scaled = amount / 2.
+    let index_two = Ratio::from_inner(2_000_000_000_000_000_000);
+    let scaled_two = index_two
+        .checked_div_value(amount)
+        .expect("scaling must not overflow");
+    assert_eq!(scaled_two, 5_000_000_000, "index 2.0 → scaled == amount / 2");
+
+    // Repaying the exact debt must not underflow: scaled_repaid (amount/index)
+    // must equal the position's scaled debt.
+    let scaled_repaid = index_one
+        .checked_div_value(scaled)
+        .expect("repay scaling must not overflow");
+    assert_eq!(scaled_repaid, amount, "repay full debt → scaled_repaid == scaled debt");
+}

@@ -53,6 +53,7 @@ mod tusdt {
         ArithmeticError,
     }
 
+    /// Result type for token operations, wrapping the contract-specific [`Error`] enum.
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtErc20 {

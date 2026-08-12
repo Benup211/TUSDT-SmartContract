@@ -1,5 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-//! Shared primitive types for the tUSDT protocol. Provides the [`Ratio`] fixed-point arithmetic
+//! Shared primitive types for the tUSDT protocol. Provides the `Ratio` fixed-point arithmetic
 //! type (wrapping `FixedU128`) for basis-point and percentage calculations, together with
 //! exponential / power functions for the vault's discrete hourly compounding model, and a set of
 //! time-constant definitions used throughout the protocol.
@@ -31,6 +31,9 @@ const BASIS_POINTS_DENOMINATOR: u128 = 10_000;
 /// A fixed-point ratio wrapping `FixedU128` for on-chain arithmetic. Supports basis-point and
 /// percentage conversion, checked multiplication/division, and exponential/power operations for
 /// the vault's hourly compounding model.
+///
+/// Stores the raw `FixedU128` inner value at the 18-decimal fixed-point scale (`1e18`), so an
+/// inner value of `1_000_000_000_000_000_000` corresponds to `1.0` — see `Ratio::from_inner`.
 #[ink::scale_derive(Encode, Decode, TypeInfo)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -39,7 +42,7 @@ pub struct Ratio(u128);
 impl Ratio {
     /// Creates a `Ratio` from the raw `u128` inner value of a `FixedU128`. The
     /// 18-decimal-place fixed-point scale means `from_inner(1_000_000_000_000_000_000)` is
-    /// equivalent to `from_integer(1)`. **Prefer [`from_integer`] for whole-number ratios**
+    /// equivalent to `from_integer(1)`. **Prefer `from_integer` for whole-number ratios**
     /// — a raw inner of `1` represents ~1e-18, not 1.0.
     pub const fn from_inner(inner: u128) -> Self {
         Self(inner)

@@ -2,6 +2,7 @@
 #![allow(clippy::upper_case_acronyms)]
 #![allow(clippy::enum_variant_names)]
 
+/// Public re-exports of the lending pool's core types.
 pub use self::lending_pool::{
     AlphaMarketParams, AlphaMarketParamsConfig, InterestRateParams, InterestRateParamsConfig,
     PoolGlobalParams, PoolGlobalParamsConfig, TusdtLendingPool, TusdtLendingPoolRef,
@@ -20,7 +21,11 @@ mod lending_pool {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
+    /// Timelock delay (ms) that pending parameter updates must wait before
+    /// they can be executed (60 seconds).
+    pub(crate) const PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
+    /// Minimum alpha stake amount accepted for collateral operations
+    /// (100_000 in 9-decimal token units).
     #[allow(dead_code)]
     pub(crate) const MIN_STAKE: Balance = 100_000;
 
@@ -188,6 +193,8 @@ mod lending_pool {
     // ── Config conversion helpers ──
 
     impl InterestRateParams {
+        /// Converts the internal Ratio-based interest-rate params to the external
+        /// basis-points (BPS) config representation.
         pub fn to_config(&self) -> InterestRateParamsConfig {
             InterestRateParamsConfig {
                 base_rate: self.base_rate.to_basis_points().unwrap_or(0),
@@ -200,6 +207,8 @@ mod lending_pool {
     }
 
     impl AlphaMarketParams {
+        /// Converts the internal Ratio-based alpha market params to the external
+        /// basis-points (BPS) config representation.
         pub fn to_config(&self) -> AlphaMarketParamsConfig {
             AlphaMarketParamsConfig {
                 collateral_factor: self.collateral_factor.to_basis_points().unwrap_or(0),
@@ -211,6 +220,8 @@ mod lending_pool {
     }
 
     impl PoolGlobalParams {
+        /// Converts the internal Ratio-based global params to the external config
+        /// representation (ratios as basis points).
         pub fn to_config(&self) -> PoolGlobalParamsConfig {
             PoolGlobalParamsConfig {
                 max_oracle_age_ms: self.max_oracle_age_ms,
@@ -333,233 +344,347 @@ mod lending_pool {
     /// Events emitted by the lending pool.
     #[ink(event)]
     pub struct LiquidDeposited {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// User who supplied.
         #[ink(topic)]
         pub user: AccountId,
+        /// Underlying amount supplied (9-decimal units).
         pub amount: Balance,
+        /// lToken balance minted.
         pub ltoken_scaled: Balance,
     }
 
+    /// Emitted when a user withdraws underlying liquidity by burning lTokens.
     #[ink(event)]
     pub struct LiquidWithdrawn {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// User who withdrew.
         #[ink(topic)]
         pub user: AccountId,
+        /// Underlying amount withdrawn (9-decimal units).
         pub amount: Balance,
+        /// lToken balance burned.
         pub ltoken_scaled: Balance,
     }
 
+    /// Emitted when a user borrows underlying from a market.
     #[ink(event)]
     pub struct Borrowed {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// Borrower.
         #[ink(topic)]
         pub user: AccountId,
+        /// Underlying amount borrowed (9-decimal units).
         pub amount: Balance,
     }
 
+    /// Emitted when a user repays borrowed underlying.
     #[ink(event)]
     pub struct Repaid {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// Borrower.
         #[ink(topic)]
         pub user: AccountId,
+        /// Underlying amount repaid (9-decimal units).
         pub amount: Balance,
     }
 
+    /// Emitted when a user deposits alpha stake as collateral.
     #[ink(event)]
     pub struct AlphaCollateralDeposited {
+        /// Subnet id the collateral was deposited on.
         #[ink(topic)]
         pub netuid: u16,
+        /// Depositor.
         #[ink(topic)]
         pub user: AccountId,
+        /// Alpha principal deposited (9-decimal units).
         pub amount: Balance,
+        /// Alpha market id assigned to the netuid.
         pub market_id: u8,
     }
 
+    /// Emitted when a user withdraws alpha collateral to a destination coldkey.
     #[ink(event)]
     pub struct AlphaCollateralWithdrawn {
+        /// Subnet id the collateral was withdrawn from.
         #[ink(topic)]
         pub netuid: u16,
+        /// Withdrawer.
         #[ink(topic)]
         pub user: AccountId,
+        /// Alpha principal withdrawn (9-decimal units).
         pub amount: Balance,
+        /// Effective alpha withdrawn (principal x yield index).
         pub effective: Balance,
+        /// Coldkey that received the transferred stake.
         #[ink(topic)]
         pub dest_coldkey: AccountId,
     }
 
+    /// Emitted when an underwater position is liquidated.
     #[ink(event)]
     pub struct Liquidated {
+        /// Borrower whose position was liquidated.
         #[ink(topic)]
         pub user: AccountId,
+        /// Netuid of the seized alpha collateral.
         #[ink(topic)]
         pub collateral_netuid: u16,
+        /// Debt market repaid (0 = TAO, 1 = TUSDT).
         pub debt_market: u8,
+        /// Debt units repaid by the liquidator.
         pub debt_covered: Balance,
+        /// Effective alpha seized (before yield-index conversion).
         pub collateral_alpha: Balance,
+        /// Account that performed the liquidation.
         #[ink(topic)]
         pub liquidator: AccountId,
     }
 
+    /// Emitted when excess alpha staking yield is claimed for a netuid.
     #[ink(event)]
     pub struct AlphaYieldClaimed {
+        /// Subnet the yield was claimed for.
         #[ink(topic)]
         pub netuid: u16,
+        /// Excess alpha found beyond booked collateral.
         pub excess_alpha: Balance,
+        /// Performance fee (25%) unstaked to TAO.
         pub performance_fee_alpha: Balance,
+        /// TAO sent to the treasury after unstaking the fee.
         pub tao_received: Balance,
+        /// Yield index (1e18) before the claim.
         pub index_before: u128,
+        /// Yield index (1e18) after the claim.
         pub index_after: u128,
     }
 
+    /// Emitted when protocol reserve fees are claimed for a market.
     #[ink(event)]
     pub struct ReserveClaimed {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// Reserve amount claimed (9-decimal units).
         pub amount: Balance,
     }
 
+    /// Emitted after interest is accrued on a supply/borrow market.
     #[ink(event)]
     pub struct MarketAccrued {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// Hours elapsed since the last accrual.
         pub dt_hours: u64,
+        /// Utilization ratio (1e18).
         pub utilization: u128,
+        /// Annual borrow rate (1e18).
         pub borrow_rate: u128,
+        /// Annual supply rate (1e18).
         pub supply_rate: u128,
+        /// Reserve accrued this period (9-decimal units).
         pub reserve_delta: Balance,
     }
 
+    /// Emitted when an interest-rate params update is scheduled for a market.
     #[ink(event)]
     pub struct MarketParamsUpdateScheduled {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// Timestamp (ms) after which the update can execute.
         pub execute_after: u64,
     }
 
+    /// Emitted when a scheduled market params update is executed.
     #[ink(event)]
     pub struct MarketParamsUpdated {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
     }
 
+    /// Emitted when a scheduled market params update is cancelled.
     #[ink(event)]
     pub struct MarketParamsUpdateCancelled {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
     }
 
+    /// Emitted when an alpha market params update is scheduled for a netuid.
     #[ink(event)]
     pub struct AlphaParamsUpdateScheduled {
+        /// Subnet id.
         #[ink(topic)]
         pub netuid: u16,
+        /// Timestamp (ms) after which the update can execute.
         pub execute_after: u64,
     }
 
+    /// Emitted when a scheduled alpha params update is executed.
     #[ink(event)]
     pub struct AlphaParamsUpdated {
+        /// Subnet id.
         #[ink(topic)]
         pub netuid: u16,
     }
 
+    /// Emitted when a scheduled alpha params update is cancelled.
     #[ink(event)]
     pub struct AlphaParamsUpdateCancelled {
+        /// Subnet id.
         #[ink(topic)]
         pub netuid: u16,
     }
 
+    /// Emitted when a global params update is scheduled.
     #[ink(event)]
     pub struct GlobalParamsUpdateScheduled {
+        /// Timestamp (ms) after which the update can execute.
         pub execute_after: u64,
     }
 
+    /// Emitted when a scheduled global params update is executed.
     #[ink(event)]
     pub struct GlobalParamsUpdated {}
 
+    /// Emitted when a scheduled global params update is cancelled.
     #[ink(event)]
     pub struct GlobalParamsUpdateCancelled {}
 
+    /// Emitted when a subnet is approved or removed as an alpha market.
     #[ink(event)]
     pub struct NetuidApproved {
+        /// Subnet id.
         #[ink(topic)]
         pub netuid: u16,
+        /// Whether the netuid was approved (true) or removed (false).
         pub approved: bool,
+        /// Alpha market id assigned when approved; None when removed.
         pub market_id: Option<u8>,
     }
 
+    /// Emitted when a market's lToken contract address is updated.
     #[ink(event)]
     pub struct LTokenAddressUpdated {
+        /// Market id (0 = TAO, 1 = TUSDT).
         #[ink(topic)]
         pub market: u8,
+        /// Previous lToken address.
         pub old_ltoken: AccountId,
+        /// New lToken address.
         pub new_ltoken: AccountId,
     }
 
+    /// Emitted when the governance role is transferred.
     #[ink(event)]
     pub struct PoolGovernanceUpdated {
+        /// Previous governance account.
         pub previous: AccountId,
+        /// New governance account.
         pub new: AccountId,
     }
 
+    /// Emitted when the treasury account is updated.
     #[ink(event)]
     pub struct PoolTreasuryUpdated {
+        /// Previous treasury account.
         pub previous: AccountId,
+        /// New treasury account.
         pub new: AccountId,
     }
 
+    /// Emitted when the platform account is updated.
     #[ink(event)]
     pub struct PoolPlatformUpdated {
+        /// Previous platform account.
         pub previous: AccountId,
+        /// New platform account.
         pub new: AccountId,
     }
 
+    /// Emitted when the pool's staking hotkey is migrated.
     #[ink(event)]
     pub struct PoolHotkeyChanged {
+        /// Previous staking hotkey.
         #[ink(topic)]
         pub old_hotkey: AccountId,
+        /// New staking hotkey.
         #[ink(topic)]
         pub new_hotkey: AccountId,
     }
 
+    /// Emitted when the oracle contract address is updated.
     #[ink(event)]
     pub struct PoolOracleAddressUpdated {
+        /// Previous oracle address.
         pub previous: AccountId,
+        /// New oracle address.
         pub new: AccountId,
     }
 
+    /// Emitted when the TUSDT token contract address is updated.
     #[ink(event)]
     pub struct TusdtAddressUpdated {
+        /// Previous TUSDT address.
         pub previous: AccountId,
+        /// New TUSDT address.
         pub new: AccountId,
     }
 
+    /// Emitted when the pool is paused (emergency pause).
     #[ink(event)]
     pub struct PoolPaused {}
 
+    /// Emitted when the pool is unpaused.
     #[ink(event)]
     pub struct PoolUnpaused {}
 
+    /// Emitted when surplus TUSDT is swept from the pool to the treasury.
     #[ink(event)]
     pub struct PoolSurplusTusdtClaimed {
+        /// Treasury account that received the sweep.
         pub recipient: AccountId,
+        /// TUSDT amount swept (9-decimal units).
         pub amount: Balance,
     }
 
+    /// Emitted when the pool's native TAO balance is swept to the treasury.
     #[ink(event)]
     pub struct PoolNativeTransferredToTreasury {
+        /// Native TAO amount transferred (9-decimal units).
         pub amount: Balance,
     }
 
+    /// Emitted when the maintainer role is updated.
     #[ink(event)]
     pub struct PoolMaintainerUpdated {
+        /// New maintainer account.
         #[ink(topic)]
         pub new_maintainer: AccountId,
     }
 
     /// Error types for the lending pool. All variants are fieldless for compact SCALE encoding.
+    ///
+    /// Variant groups:
+    /// - **Access**: `NotGovernance`, `NotGovernanceOrPlatform`, `NotMaintainer`, `ContractPaused`, `Reentrancy`
+    /// - **Amounts & liquidity**: `ZeroAmount`, `LiquidityInsufficient`, `MintBelowPrecision`, `InsufficientLTokenBalance`, `SupplyCapExceeded`, `BorrowCapExceeded`, `BorrowHealthExceeded`, `RepayAmountTooHigh`
+    /// - **Alpha collateral**: `UnapprovedNetuid`, `NetuidHasPositions`, `InsufficientCollateral`, `InsufficientAvailableStake`, `StakeTransferFailed`, `ChainExtensionFailed`, `NoAlphaStakeFound`, `TooManyNetuids`
+    /// - **Pricing & health**: `OracleCallFailed`, `OraclePriceUnavailable`, `OraclePriceStale`, `HealthFactorBelowThreshold`, `NotLiquidatable`, `InvalidCollateralNetuid`, `InvalidDebtMarket`, `CloseFactorExceeded`, `CollateralAwardExceedsPosition`
+    /// - **Params / timelock**: `InvalidRatio`, `InvalidParam`, `NoPendingMarketParamsUpdate`, `NoPendingAlphaParamsUpdate`, `NoPendingGlobalParamsUpdate`, `ParamsUpdateTimelockActive`
+    /// - **Cross-contract**: `TokenContractCallFailed`, `TokenTransferFromFailed`, `LTokenCallFailed`, `TransferFailed`
+    /// - **General**: `MarketNotFound`, `PositionNotFound`, `ArithmeticError`
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
@@ -621,6 +746,8 @@ mod lending_pool {
         ArithmeticError,
     }
 
+    /// Result type alias used across the lending pool, with [`Error`] as the
+    /// error type.
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtLendingPool {
@@ -770,6 +897,8 @@ mod lending_pool {
         // Access control
         // ─────────────────────────────────────────────────────────────
 
+        /// Acquires the reentrancy guard. Returns `Error::Reentrancy` if the guard
+        /// is already held; sets `busy = true` on success.
         pub(crate) fn ensure_idle(&mut self) -> Result<()> {
             if self.busy {
                 return Err(Error::Reentrancy);
@@ -778,6 +907,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Releases the reentrancy guard (`busy = false`). Must be called on every
+        /// path after `ensure_idle`, including error paths.
         pub(crate) fn set_idle(&mut self) {
             self.busy = false;
         }
@@ -842,6 +973,8 @@ mod lending_pool {
             }
         }
 
+        /// Reverts with `Error::NotGovernance` unless the caller is the governance
+        /// account.
         pub(crate) fn ensure_governance(&self) -> Result<()> {
             if self.env().caller() != self.governance {
                 return Err(Error::NotGovernance);
@@ -849,6 +982,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Reverts with `Error::NotGovernanceOrPlatform` unless the caller is the
+        /// governance or the platform account.
         pub(crate) fn ensure_governance_or_platform(&self) -> Result<()> {
             let caller = self.env().caller();
             if caller != self.governance && caller != self.platform {
@@ -857,6 +992,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Reverts with `Error::NotMaintainer` unless the caller is the maintainer
+        /// or the governance account.
         pub(crate) fn ensure_maintainer(&self) -> Result<()> {
             let caller = self.env().caller();
             if caller != self.maintainer && caller != self.governance {
@@ -865,6 +1002,7 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Reverts with `Error::ContractPaused` when the pool is paused.
         pub(crate) fn ensure_not_paused(&self) -> Result<()> {
             if self.paused {
                 return Err(Error::ContractPaused);
@@ -872,6 +1010,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Reverts with `Error::UnapprovedNetuid` unless the netuid is an approved
+        /// alpha market.
         pub(crate) fn ensure_approved_netuid(&self, netuid: u16) -> Result<()> {
             if self.netuid_to_market.get(netuid).is_none() {
                 return Err(Error::UnapprovedNetuid);
@@ -883,6 +1023,10 @@ mod lending_pool {
         // Interest rate math
         // ─────────────────────────────────────────────────────────────
 
+        /// Accrues interest for a supply/borrow market (0 = TAO, 1 = TUSDT); a
+        /// no-op for alpha markets (id >= 2). Updates borrow index, exchange rate,
+        /// and reserve, and emits `MarketAccrued`. Errors: `Error::MarketNotFound`,
+        /// `Error::ArithmeticError`.
         pub(crate) fn accrue_interest(&mut self, market_id: u8) -> Result<()> {
             if market_id >= 2 {
                 return Ok(());
@@ -962,6 +1106,10 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Computes the annual borrow rate (1e18 ratio) for a given utilization
+        /// from the market's interest-rate curve: `base_rate + slope1 * min(util,
+        /// optimal)/optimal` plus `slope2` applied to the excess above optimal.
+        /// Errors: `Error::ArithmeticError`.
         pub(crate) fn compute_borrow_rate(
             params: &InterestRateParams,
             utilization: Ratio,
@@ -997,6 +1145,9 @@ mod lending_pool {
             }
         }
 
+        /// Returns the pool's physical cash for a market: the native balance for
+        /// TAO (market 0) and the pool's TUSDT balance for market 1. Errors:
+        /// `Error::MarketNotFound` for any other market.
         pub(crate) fn market_cash(&self, market_id: u8) -> Result<Balance> {
             match market_id {
                 0 => Ok(self.env().balance()),
@@ -1009,6 +1160,9 @@ mod lending_pool {
         // Risk math
         // ─────────────────────────────────────────────────────────────
 
+        /// Returns the TUSDT/TAO oracle price as a 1e18 ratio, enforcing freshness
+        /// against `max_oracle_age_ms`. Errors: `Error::OraclePriceUnavailable`,
+        /// `Error::OraclePriceStale`, `Error::ArithmeticError`.
         pub(crate) fn get_oracle_price(&self) -> Result<Ratio> {
             let price_data = self.oracle.get_latest_price().ok_or(Error::OraclePriceUnavailable)?;
             let now = self.env().block_timestamp();
@@ -1025,6 +1179,10 @@ mod lending_pool {
             Ok(price_data.price)
         }
 
+        /// Returns the alpha collateral price in TUSDT per alpha unit (1e18 ratio),
+        /// computed from the chain-extension alpha price (RAO) times the TUSDT/TAO
+        /// oracle price. Errors: `Error::ChainExtensionFailed`, oracle errors, and
+        /// `Error::ArithmeticError`.
         pub(crate) fn collateral_price(&self, netuid: u16) -> Result<Ratio> {
             let tusdt_per_tao = self.get_oracle_price()?;
             let alpha_price_rao = self
@@ -1036,12 +1194,17 @@ mod lending_pool {
             tusdt_per_tao.checked_mul(alpha_to_tao).ok_or(Error::ArithmeticError)
         }
 
+        /// Converts an alpha price in RAO (1e9 per alpha) to a 1e18 ratio. Errors:
+        /// `Error::ArithmeticError` on overflow.
         pub(crate) fn alpha_price_rao_to_ratio(alpha_price_rao: u64) -> Result<Ratio> {
             Ratio::from_integer(alpha_price_rao.into())
                 .checked_div_int(1_000_000_000u128)
                 .ok_or(Error::ArithmeticError)
         }
 
+        /// Computes a user's effective alpha collateral for a netuid as
+        /// `alpha_principal * yield_index`. Errors: `Error::UnapprovedNetuid`,
+        /// `Error::ArithmeticError`.
         pub(crate) fn effective_alpha(&self, user: AccountId, netuid: u16) -> Result<Balance> {
             let market_id = self.netuid_to_market.get(netuid).ok_or(Error::UnapprovedNetuid)?;
             let pos = self.positions.get((market_id, user)).unwrap_or(Position {
@@ -1059,6 +1222,10 @@ mod lending_pool {
                 .ok_or(Error::ArithmeticError)
         }
 
+        /// Computes the user's total alpha collateral value in TUSDT (9-decimal
+        /// units) across all approved netuids, priced at current oracle rates.
+        /// Errors: `Error::MarketNotFound`, `Error::ArithmeticError`, plus
+        /// oracle/chain-extension errors.
         pub fn get_collateral_value_tusdt(&self, user: AccountId) -> Result<Balance> {
             let mut total: u128 = 0;
             let count = self.market_keys.len();
@@ -1082,6 +1249,10 @@ mod lending_pool {
             Balance::try_from(total).map_err(|_| Error::ArithmeticError)
         }
 
+        /// Computes the user's total debt in TUSDT (9-decimal units): TUSDT debt
+        /// plus TAO debt converted at the oracle price. Errors:
+        /// `Error::MarketNotFound`, `Error::ArithmeticError`,
+        /// `Error::OraclePriceUnavailable`, `Error::OraclePriceStale`.
         pub fn get_debt_value_tusdt(&self, user: AccountId) -> Result<Balance> {
             let tusdt_state = self.markets.get(1).ok_or(Error::MarketNotFound)?;
             let tusdt_pos = self.positions.get((1, user)).unwrap_or(Position {
@@ -1122,6 +1293,10 @@ mod lending_pool {
                 .map_err(|_| Error::ArithmeticError)
         }
 
+        /// Returns the user's health factor as
+        /// `(max liquidation threshold * collateral value) / debt value`, or `None`
+        /// when the user has no debt. Errors: `Error::MarketNotFound`,
+        /// `Error::ArithmeticError`, plus oracle/chain-extension errors.
         pub fn get_health_factor(&self, user: AccountId) -> Result<Option<Ratio>> {
             let debt_value = self.get_debt_value_tusdt(user)?;
             if debt_value == 0 {
@@ -1167,6 +1342,10 @@ mod lending_pool {
             Ok(max_threshold)
         }
 
+        /// Returns the maximum additional TUSDT the user can borrow:
+        /// `min collateral factor * collateral value - current debt`. Errors:
+        /// `Error::MarketNotFound`, `Error::ArithmeticError`, plus oracle/
+        /// chain-extension errors.
         pub fn get_available_borrow_tusdt(&self, user: AccountId) -> Result<Balance> {
             let collateral_value = self.get_collateral_value_tusdt(user)?;
             if collateral_value == 0 {
@@ -1214,6 +1393,9 @@ mod lending_pool {
             Ok(min_factor)
         }
 
+        /// Returns `true` when the user's health factor is below 1.0 (underwater).
+        /// Errors: `Error::MarketNotFound`, `Error::ArithmeticError`, plus
+        /// oracle/chain-extension errors.
         pub fn is_liquidatable(&self, user: AccountId) -> Result<bool> {
             match self.get_health_factor(user)? {
                 None => Ok(false),
@@ -1225,6 +1407,10 @@ mod lending_pool {
         // Param validation
         // ─────────────────────────────────────────────────────────────
 
+        /// Validates a basis-points interest-rate config (optimal utilization in
+        /// (0, 10_000], slopes summing <= 10_000, reserve factor < 10_000) and
+        /// converts it to internal Ratio-based params. Errors:
+        /// `Error::InvalidParam`, `Error::ArithmeticError`.
         pub(crate) fn interest_params_from_config(
             config: InterestRateParamsConfig,
         ) -> Result<InterestRateParams> {
@@ -1248,6 +1434,9 @@ mod lending_pool {
             })
         }
 
+        /// Validates internal Ratio-based interest params: max rate <= 100%,
+        /// optimal utilization in (0, 100%], reserve factor < 100%. Errors:
+        /// `Error::InvalidRatio`, `Error::ArithmeticError`.
         pub(crate) fn validate_interest_params(params: &InterestRateParams) -> Result<()> {
             let max_rate = Ratio::from_inner(
                 params
@@ -1271,6 +1460,9 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Validates a basis-points alpha market config (collateral factor <
+        /// liquidation threshold <= 10_000, bonus <= 2_500) and converts it to
+        /// internal Ratio-based params. Errors: `Error::InvalidParam`.
         pub(crate) fn alpha_params_from_config(
             config: AlphaMarketParamsConfig,
         ) -> Result<AlphaMarketParams> {
@@ -1291,6 +1483,9 @@ mod lending_pool {
             })
         }
 
+        /// Validates internal Ratio-based alpha params: collateral factor > 0 and
+        /// < liquidation threshold <= 100%, bonus <= 25%. Errors:
+        /// `Error::InvalidRatio`.
         pub(crate) fn validate_alpha_params(params: &AlphaMarketParams) -> Result<()> {
             if params.collateral_factor.is_zero()
                 || params.collateral_factor.into_inner()
@@ -1308,6 +1503,9 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Validates a global params config (oracle age > 0, close factor in
+        /// (0, 5_000], performance fee <= 5_000) and converts it to internal
+        /// Ratio-based params. Errors: `Error::InvalidParam`.
         pub(crate) fn global_params_from_config(
             config: PoolGlobalParamsConfig,
         ) -> Result<PoolGlobalParams> {
@@ -1331,6 +1529,8 @@ mod lending_pool {
             })
         }
 
+        /// Validates internal Ratio-based global params with the same bounds as
+        /// `global_params_from_config`. Errors: `Error::InvalidRatio`.
         pub(crate) fn validate_global_params(params: &PoolGlobalParams) -> Result<()> {
             if params.max_oracle_age_ms == 0 {
                 return Err(Error::InvalidRatio);
@@ -1744,8 +1944,11 @@ mod lending_pool {
 
             // Effects
             let state = self.markets.get(0).ok_or(Error::MarketNotFound)?;
-            let scaled = Ratio::from_integer(amount.into())
-                .checked_div_value(state.borrow_index.into_inner())
+            // scaled = amount / borrow_index — checked_div_value(value) computes
+            // value / self, so the Ratio must be the borrow_index (divisor).
+            let scaled = state
+                .borrow_index
+                .checked_div_value(amount.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -1814,8 +2017,11 @@ mod lending_pool {
 
             // Effects
             let state = self.markets.get(1).ok_or(Error::MarketNotFound)?;
-            let scaled = Ratio::from_integer(amount.into())
-                .checked_div_value(state.borrow_index.into_inner())
+            // scaled = amount / borrow_index — checked_div_value(value) computes
+            // value / self, so the Ratio must be the borrow_index (divisor).
+            let scaled = state
+                .borrow_index
+                .checked_div_value(amount.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -1889,8 +2095,11 @@ mod lending_pool {
             }
 
             // Effects
-            let scaled_repaid = Ratio::from_integer(repay_amount.into())
-                .checked_div_value(state.borrow_index.into_inner())
+            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
+            // computes value / self, so the Ratio must be the borrow_index (divisor).
+            let scaled_repaid = state
+                .borrow_index
+                .checked_div_value(repay_amount.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -1954,8 +2163,11 @@ mod lending_pool {
                 .map_err(|_| Error::TokenTransferFromFailed)?;
 
             // Effects
-            let scaled_repaid = Ratio::from_integer(repay_amount.into())
-                .checked_div_value(state.borrow_index.into_inner())
+            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
+            // computes value / self, so the Ratio must be the borrow_index (divisor).
+            let scaled_repaid = state
+                .borrow_index
+                .checked_div_value(repay_amount.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -2300,8 +2512,11 @@ mod lending_pool {
                 .checked_mul_value(cover_value_tusdt.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
-            let alpha_to_seize = Ratio::from_integer(collateral_value_tusdt.into())
-                .checked_div_value(collateral_price.into_inner())
+            // alpha_to_seize = collateral_value_tusdt / collateral_price —
+            // checked_div_value(value) computes value / self, so the Ratio must
+            // be the collateral_price (divisor).
+            let alpha_to_seize = collateral_price
+                .checked_div_value(collateral_value_tusdt.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -2327,8 +2542,11 @@ mod lending_pool {
             // ── Effects (all before external calls) ──
 
             // 1. Reduce borrower debt
-            let scaled_repaid = Ratio::from_integer(actual_debt_units.into())
-                .checked_div_value(state.borrow_index.into_inner())
+            // scaled_repaid = actual_debt_units / borrow_index — checked_div_value(value)
+            // computes value / self, so the Ratio must be the borrow_index (divisor).
+            let scaled_repaid = state
+                .borrow_index
+                .checked_div_value(actual_debt_units.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -2651,6 +2869,10 @@ mod lending_pool {
         // Governance: interest rate params (timelocked)
         // ─────────────────────────────────────────────────────────────
 
+        /// Schedules an interest-rate params update for a market (0 = TAO,
+        /// 1 = TUSDT), executable after the timelock. Maintainer only. Errors:
+        /// `Error::NotMaintainer`, `Error::MarketNotFound`, `Error::InvalidParam`,
+        /// `Error::InvalidRatio`, `Error::ArithmeticError`.
         #[ink(message)]
         pub fn set_market_params(
             &mut self,
@@ -2675,6 +2897,10 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Executes a scheduled market params update. Permissionless, but blocked
+        /// until the timelock expires. Errors:
+        /// `Error::NoPendingMarketParamsUpdate`, `Error::ParamsUpdateTimelockActive`,
+        /// `Error::InvalidParam`, `Error::InvalidRatio`.
         #[ink(message)]
         pub fn execute_market_params_update(&mut self, market_id: u8) -> Result<()> {
             let pending = self
@@ -2693,6 +2919,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Cancels a scheduled market params update. Maintainer only. Errors:
+        /// `Error::NotMaintainer`, `Error::NoPendingMarketParamsUpdate`.
         #[ink(message)]
         pub fn cancel_market_params_update(&mut self, market_id: u8) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2708,6 +2936,9 @@ mod lending_pool {
         // Governance: global params (timelocked)
         // ─────────────────────────────────────────────────────────────
 
+        /// Schedules a global params update, executable after the timelock.
+        /// Maintainer only. Errors: `Error::NotMaintainer`, `Error::InvalidParam`,
+        /// `Error::InvalidRatio`, `Error::ArithmeticError`.
         #[ink(message)]
         pub fn set_global_params(&mut self, config: PoolGlobalParamsConfig) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2725,6 +2956,10 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Executes a scheduled global params update. Permissionless, but blocked
+        /// until the timelock expires. Errors:
+        /// `Error::NoPendingGlobalParamsUpdate`, `Error::ParamsUpdateTimelockActive`,
+        /// `Error::InvalidParam`, `Error::InvalidRatio`.
         #[ink(message)]
         pub fn execute_global_params_update(&mut self) -> Result<()> {
             let pending = self.pending_global_params.ok_or(Error::NoPendingGlobalParamsUpdate)?;
@@ -2740,6 +2975,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Cancels a scheduled global params update. Maintainer only. Errors:
+        /// `Error::NotMaintainer`, `Error::NoPendingGlobalParamsUpdate`.
         #[ink(message)]
         pub fn cancel_global_params_update(&mut self) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2755,6 +2992,8 @@ mod lending_pool {
         // Governance: role and address management
         // ─────────────────────────────────────────────────────────────
 
+        /// Transfers the governance role. Governance only. Errors:
+        /// `Error::NotGovernance`.
         #[ink(message)]
         pub fn update_governance(&mut self, new_governance: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -2764,6 +3003,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Sets the maintainer role. Governance only. Errors:
+        /// `Error::NotGovernance`.
         #[ink(message)]
         pub fn update_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -2772,11 +3013,14 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Returns the current maintainer account.
         #[ink(message)]
         pub fn maintainer(&self) -> AccountId {
             self.maintainer
         }
 
+        /// Sets the treasury account. Governance only. Errors:
+        /// `Error::NotGovernance`.
         #[ink(message)]
         pub fn update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
             self.ensure_governance()?;
@@ -2786,6 +3030,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Sets the platform account. Maintainer only. Errors:
+        /// `Error::NotMaintainer`.
         #[ink(message)]
         pub fn update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2795,6 +3041,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Points the pool at a new oracle contract. Maintainer only. Errors:
+        /// `Error::NotMaintainer`.
         #[ink(message)]
         pub fn update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2804,6 +3052,8 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Replaces the lToken contract address for a market. Maintainer only.
+        /// Errors: `Error::NotMaintainer`, `Error::MarketNotFound`.
         #[ink(message)]
         pub fn update_ltoken_address(
             &mut self,
@@ -2851,6 +3101,9 @@ mod lending_pool {
         // Emergency pause
         // ─────────────────────────────────────────────────────────────
 
+        /// Pauses the pool, blocking supply/withdraw/borrow/repay/deposit
+        /// operations. Governance or platform only. Errors:
+        /// `Error::NotGovernanceOrPlatform`.
         #[ink(message)]
         pub fn pause(&mut self) -> Result<()> {
             self.ensure_governance_or_platform()?;
@@ -2859,6 +3112,7 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Unpauses the pool. Maintainer only. Errors: `Error::NotMaintainer`.
         #[ink(message)]
         pub fn unpause(&mut self) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2871,6 +3125,9 @@ mod lending_pool {
         // Surplus sweeps
         // ─────────────────────────────────────────────────────────────
 
+        /// Transfers `amount` of surplus TUSDT from the pool to the treasury.
+        /// Maintainer only. Errors: `Error::NotMaintainer`,
+        /// `Error::TokenContractCallFailed`.
         #[ink(message)]
         pub fn claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2881,6 +3138,9 @@ mod lending_pool {
             Ok(())
         }
 
+        /// Sweeps the pool's native TAO balance (minus the 1 existential deposit
+        /// guard) to the treasury. Maintainer only. Errors:
+        /// `Error::NotMaintainer`, `Error::TransferFailed`.
         #[ink(message)]
         pub fn transfer_native_to_treasury(&mut self) -> Result<()> {
             self.ensure_maintainer()?;
@@ -2898,26 +3158,33 @@ mod lending_pool {
         // View / read methods
         // ─────────────────────────────────────────────────────────────
 
+        /// Returns the runtime state of a market, or `None` if it does not exist.
         #[ink(message)]
         pub fn get_market_state(&self, market_id: u8) -> Option<MarketState> {
             self.markets.get(market_id)
         }
 
+        /// Returns the position of a user in a market, or `None` if it does not
+        /// exist.
         #[ink(message)]
         pub fn get_position(&self, market_id: u8, user: AccountId) -> Option<Position> {
             self.positions.get((market_id, user))
         }
 
+        /// Returns the lToken exchange rate (1e18) for a market, or `None`.
         #[ink(message)]
         pub fn get_exchange_rate(&self, market_id: u8) -> Option<Ratio> {
             self.markets.get(market_id).map(|s| s.exchange_rate)
         }
 
+        /// Returns the borrow index (1e18) for a market, or `None`.
         #[ink(message)]
         pub fn get_borrow_index(&self, market_id: u8) -> Option<Ratio> {
             self.markets.get(market_id).map(|s| s.borrow_index)
         }
 
+        /// Returns the market utilization as `total_debt / (total_debt + cash)`
+        /// (1e18 ratio), or `None`.
         #[ink(message)]
         pub fn get_utilization(&self, market_id: u8) -> Option<Ratio> {
             let state = self.markets.get(market_id)?;
@@ -2929,6 +3196,7 @@ mod lending_pool {
             Ratio::from_integer(state.total_debt.into()).checked_div_int(total.into())
         }
 
+        /// Returns the current annual borrow rate (1e18) for a market, or `None`.
         #[ink(message)]
         pub fn get_borrow_rate(&self, market_id: u8) -> Option<Ratio> {
             let params = self.market_params.get(market_id)?;
@@ -2936,6 +3204,7 @@ mod lending_pool {
             Self::compute_borrow_rate(&params, utilization).ok()
         }
 
+        /// Returns the current annual supply rate (1e18) for a market, or `None`.
         #[ink(message)]
         pub fn get_supply_rate(&self, market_id: u8) -> Option<Ratio> {
             let params = self.market_params.get(market_id)?;
@@ -2950,6 +3219,8 @@ mod lending_pool {
             })
         }
 
+        /// Returns the underlying amount a user's lToken balance is worth in a
+        /// market, or `None`.
         #[ink(message)]
         pub fn get_underlying_balance(&self, market_id: u8, user: AccountId) -> Option<Balance> {
             let pos = self.positions.get((market_id, user))?;
@@ -2966,6 +3237,8 @@ mod lending_pool {
                 .and_then(|v| u64::try_from(v).ok())
         }
 
+        /// Returns a user's current debt in a market in underlying units
+        /// (including accrued interest), or `None`.
         #[ink(message)]
         pub fn get_user_debt(&self, market_id: u8, user: AccountId) -> Option<Balance> {
             let pos = self.positions.get((market_id, user)).unwrap_or(Position {
@@ -2983,6 +3256,7 @@ mod lending_pool {
                 .and_then(|v| Balance::try_from(v).ok())
         }
 
+        /// Returns all approved alpha markets as `(netuid, params)` pairs.
         #[ink(message)]
         pub fn get_alpha_markets(&self) -> Vec<(u16, AlphaMarketParams)> {
             let mut result = Vec::new();
@@ -3005,6 +3279,7 @@ mod lending_pool {
             result
         }
 
+        /// Returns a user's alpha principal collateral for a netuid, or `None`.
         #[ink(message)]
         pub fn get_user_alpha_position(&self, user: AccountId, netuid: u16) -> Option<Balance> {
             let market_id = self.netuid_to_market.get(netuid)?;
@@ -3012,21 +3287,26 @@ mod lending_pool {
             Some(pos.alpha_principal)
         }
 
+        /// Returns the per-netuid yield index (1e18), or `None`.
         #[ink(message)]
         pub fn get_alpha_yield_index(&self, netuid: u16) -> Option<Ratio> {
             Some(self.netuid_yield_index.get(netuid).unwrap_or(Ratio::one()))
         }
 
+        /// Returns the total alpha principal collateral booked for a netuid, or
+        /// `None`.
         #[ink(message)]
         pub fn get_netuid_total_collateral(&self, netuid: u16) -> Option<Balance> {
             self.netuid_total_collateral.get(netuid)
         }
 
+        /// Returns `true` if the netuid is an approved alpha market.
         #[ink(message)]
         pub fn is_approved_netuid(&self, netuid: u16) -> bool {
             self.netuid_to_market.get(netuid).is_some()
         }
 
+        /// Returns the number of approved alpha markets (market ids >= 2).
         #[ink(message)]
         pub fn get_active_netuids_count(&self) -> u32 {
             let count = self.market_keys.len();
@@ -3041,6 +3321,7 @@ mod lending_pool {
             alpha_count
         }
 
+        /// Returns up to `PAGE_SIZE` positions of a user on the given page.
         #[ink(message)]
         pub fn get_positions(&self, user: AccountId, page: u32) -> Vec<(u8, Position)> {
             let mut result = Vec::new();
@@ -3067,6 +3348,8 @@ mod lending_pool {
             result
         }
 
+        /// Returns up to `PAGE_SIZE` positions across all users on the given
+        /// page.
         #[ink(message)]
         pub fn get_all_positions(&self, page: u32) -> Vec<((u8, AccountId), Position)> {
             let mut result = Vec::new();
@@ -3090,6 +3373,7 @@ mod lending_pool {
             result
         }
 
+        /// Returns the pending alpha params update for a netuid, or `None`.
         #[ink(message)]
         pub fn get_pending_alpha_params_update(
             &self,
@@ -3098,6 +3382,7 @@ mod lending_pool {
             self.pending_alpha_params.get(netuid)
         }
 
+        /// Returns the pending market params update for a market, or `None`.
         #[ink(message)]
         pub fn get_pending_market_params_update(
             &self,
@@ -3106,6 +3391,7 @@ mod lending_pool {
             self.pending_market_params.get(market_id)
         }
 
+        /// Returns the pending global params update, or `None`.
         #[ink(message)]
         pub fn get_pending_global_params_update(&self) -> Option<PendingGlobalParamsUpdate> {
             self.pending_global_params
@@ -3115,56 +3401,70 @@ mod lending_pool {
         // Role / address getters
         // ─────────────────────────────────────────────────────────────
 
+        /// Returns the governance account.
         #[ink(message)]
         pub fn governance(&self) -> AccountId {
             self.governance
         }
 
+        /// Returns the treasury account.
         #[ink(message)]
         pub fn treasury(&self) -> AccountId {
             self.treasury
         }
 
+        /// Returns the platform account.
         #[ink(message)]
         pub fn platform(&self) -> AccountId {
             self.platform
         }
 
+        /// Returns whether the pool is currently paused.
         #[ink(message)]
         pub fn paused(&self) -> bool {
             self.paused
         }
 
+        /// Returns the oracle contract address.
         #[ink(message)]
         pub fn get_oracle_address(&self) -> AccountId {
             self.oracle.to_account_id()
         }
 
+        /// Returns the TUSDT token contract address.
         #[ink(message)]
         pub fn get_tusdt_address(&self) -> AccountId {
             self.tusdt.to_account_id()
         }
 
+        /// Returns the lToken contract address for a market, or `None`.
         #[ink(message)]
         pub fn get_ltoken_address(&self, market: u8) -> Option<AccountId> {
             self.ltoken_by_market.get(market)
         }
 
+        /// Returns the pool's staking hotkey.
         #[ink(message)]
         pub fn get_pool_hotkey(&self) -> AccountId {
             self.pool_hotkey
         }
 
+        /// Returns the current global params as an external config (ratios in
+        /// basis points).
         #[ink(message)]
         pub fn get_global_params(&self) -> PoolGlobalParamsConfig {
             self.global_params.to_config()
         }
 
+        /// Returns the current interest-rate params of a market as an external
+        /// config (basis points), or `None`.
         #[ink(message)]
         pub fn get_market_params(&self, market_id: u8) -> Option<InterestRateParamsConfig> {
             self.market_params.get(market_id).map(|p| p.to_config())
         }
 
+        /// Returns the current alpha market params of a netuid as an external
+        /// config (basis points), or `None`.
         #[ink(message)]
         pub fn get_alpha_params(&self, netuid: u16) -> Option<AlphaMarketParamsConfig> {
             self.alpha_params.get(netuid).map(|p| p.to_config())

@@ -19,6 +19,10 @@ mod oracle {
     const DEFAULT_MIN_SUBMITTER_STAKE: u128 = 10_000_000_000;
 
     /// Snapshot of a committed oracle round, including its final price and source median.
+    ///
+    /// Carries the round id, the committed `price`, the `median_price` of reporter submissions,
+    /// the `reporter_count`, the block timestamp (`committed_at`) when the round was committed,
+    /// and a `was_overridden` flag set when a validator or governance override supplied the price.
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -52,6 +56,9 @@ mod oracle {
     }
 
     /// Lightweight summary of a round used by view callers.
+    ///
+    /// Aggregates the round id, the number of reporters, and the median submission price
+    /// (when available) without the full submission history.
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -148,7 +155,12 @@ mod oracle {
         new_controller: AccountId,
     }
 
-    /// Errors returned by the oracle contract.
+    /// Errors returned by the oracle contract. All variants are fieldless; they group into
+    /// authorization failures (`NotController`/`NotGovernance`/`NotValidator`), submitter
+    /// eligibility (`InvalidHotkey`/`NotRegisteredInSubnet`/`InsufficientStake`), price and round
+    /// validation (`InvalidPrice`/`NotEnoughSubmissions`/`MedianUnavailable`/
+    /// `MaxSubmissionsReached`/`PriceDeviationExceeded`), and infrastructure failures
+    /// (`ChainExtensionFailed`/`ArithmeticError`).
     #[derive(Debug, PartialEq, Eq)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     pub enum Error {
@@ -180,6 +192,7 @@ mod oracle {
         ArithmeticError,
     }
 
+    /// Contract-level result type: `Result<T>` is `core::result::Result<T, Error>`.
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtOracle {

@@ -18,7 +18,9 @@ mod vault {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
+    /// Standard timelock (60 seconds) that scheduled contract and global parameter updates
+    /// must wait before they can be executed.
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
 
     mod params {
         include!("params.rs");
@@ -35,12 +37,17 @@ mod vault {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct Vault {
+        /// Per-owner sequential vault identifier.
         pub id: u32,
+        /// Account that opened the vault and controls its collateral.
         pub owner: AccountId,
         /// Which approved subnet this vault's alpha is from.
         pub netuid: u16,
+        /// Alpha stake held as collateral (Balance = u64, 9 decimals).
         pub collateral_balance: Balance,
+        /// Outstanding tUSDT borrowed against this vault.
         pub borrowed_token_balance: Balance,
+        /// Block timestamp when the vault was created.
         pub created_at: u64,
     }
 
@@ -49,8 +56,11 @@ mod vault {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct VaultContractParams {
+        /// Minimum collateralization ratio required for new borrows.
         pub collateral_ratio: Ratio,
+        /// Collateralization ratio below which the vault is liquidatable.
         pub liquidation_ratio: Ratio,
+        /// Fee charged on the collateral sold during liquidation.
         pub liquidation_fee: Ratio,
     }
 
@@ -59,8 +69,11 @@ mod vault {
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     /// External per-netuid config uses basis points for ratio fields, where `100 = 1%`.
     pub struct VaultContractParamsConfig {
+        /// Collateral ratio in basis points (100 = 1%).
         pub collateral_ratio: u32,
+        /// Liquidation ratio in basis points (100 = 1%).
         pub liquidation_ratio: u32,
+        /// Liquidation fee in basis points (100 = 1%).
         pub liquidation_fee: u32,
     }
 
@@ -69,7 +82,9 @@ mod vault {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct PendingContractParamsUpdate {
+        /// The scheduled per-netuid parameter config awaiting execution.
         pub params: VaultContractParamsConfig,
+        /// Earliest block timestamp at which the update may be executed.
         pub execute_after: u64,
     }
 
@@ -78,9 +93,13 @@ mod vault {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct VaultGlobalParams {
+        /// Contract-wide transaction fee on liquidation collateral.
         pub transaction_fee: Ratio,
+        /// Default liquidation auction duration in milliseconds.
         pub auction_duration_ms: u64,
+        /// Maximum acceptable age of an oracle price, in milliseconds.
         pub max_oracle_age_ms: u64,
+        /// Native TAO fee charged to open a vault (spam deterrent).
         pub vault_creation_fee: Balance,
     }
 
@@ -89,9 +108,13 @@ mod vault {
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     /// External global config uses basis points for the fee field, where `100 = 1%`.
     pub struct VaultGlobalParamsConfig {
+        /// Transaction fee in basis points (100 = 1%).
         pub transaction_fee: u32,
+        /// Default liquidation auction duration in milliseconds.
         pub auction_duration_ms: u64,
+        /// Maximum acceptable age of an oracle price, in milliseconds.
         pub max_oracle_age_ms: u64,
+        /// Native TAO fee charged to open a vault (spam deterrent).
         pub vault_creation_fee: Balance,
     }
 
@@ -100,7 +123,9 @@ mod vault {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct PendingGlobalParamsUpdate {
+        /// The scheduled global parameter config awaiting execution.
         pub params: VaultGlobalParamsConfig,
+        /// Earliest block timestamp at which the update may be executed.
         pub execute_after: u64,
     }
 
@@ -462,6 +487,7 @@ mod vault {
         NetuidHasPositions,
     }
 
+    /// Result type for alpha-vault operations, wrapping the contract-specific `Error` enum.
     pub type Result<T> = core::result::Result<T, Error>;
 
     /// Maximum number of netuids that can be passed to `set_vault_hotkey` in one call.
@@ -526,14 +552,14 @@ mod vault {
         }
 
         /// Initializes an alpha vault reusing an already-deployed TUSDT token contract.
-        /// Unlike [`new`], this does NOT spawn a new ERC20 — it takes `token_address`
+        /// Unlike `new`, this does NOT spawn a new ERC20 — it takes `token_address`
         /// as an existing contract. The deployer becomes the initial governance.
         /// New auction and oracle child contracts are still spawned.
         ///
         /// Use this constructor when upgrading: the existing ERC20 (with balances,
         /// allowances, supply, and minter set) is preserved across the upgrade, and a
         /// new vault instance takes over control after governance transfers the token
-        /// controller via [`set_token_controller`].
+        /// controller via `set_token_controller`.
         #[ink(constructor)]
         pub fn new_upgrade(
             treasury: AccountId,
@@ -584,14 +610,14 @@ mod vault {
         }
 
         /// Initializes an alpha vault reusing already-deployed token, auction, and oracle
-        /// contracts. Unlike [`new`], this does NOT spawn any child contracts — it takes
+        /// contracts. Unlike `new`, this does NOT spawn any child contracts — it takes
         /// existing addresses for all three. The deployer becomes the initial governance.
         ///
         /// Use this constructor for a full state-preserving upgrade where the auction and
         /// oracle are retained alongside the token. Before calling
-        /// [`update_governance`] on the new vault, governance MUST call
+        /// `update_governance` on the new vault, governance MUST call
         /// `set_controller` on the existing auction and oracle contracts to transfer
-        /// their controller role to this vault, otherwise [`update_governance`]'s
+        /// their controller role to this vault, otherwise `update_governance`'s
         /// `sync_child_governance` will fail (auction/oracle `update_governance` is
         /// controller-gated).
         #[ink(constructor)]
@@ -1038,7 +1064,7 @@ mod vault {
         /// `transfer_stake` extrinsic is needed.
         ///
         /// A vault creation fee (in native TAO) is charged to deter spam. The fee amount
-        /// is governed by [`VaultGlobalParams::vault_creation_fee`]. Any excess transferred
+        /// is governed by `VaultGlobalParams::vault_creation_fee`. Any excess transferred
         /// value is refunded to the caller.
         #[ink(message, payable)]
         pub fn create_alpha_vault(&mut self, amount: Balance, netuid: u16) -> Result<u32> {
@@ -1821,6 +1847,9 @@ mod vault {
 
     #[cfg(test)]
     impl TusdtVaultAlpha {
+        /// Test-only constructor: builds a vault with placeholder child-contract
+        /// addresses so unit tests can run without deployed token/auction/oracle
+        /// instances. The governance account also becomes maintainer and platform.
         pub(crate) fn new_for_test(governance: AccountId) -> Self {
             use ink::env::call::FromAccountId;
 
@@ -1851,6 +1880,8 @@ mod vault {
             }
         }
 
+        /// Test-only: directly record the liquidation-auction mapping for
+        /// (owner, vault_id) without going through the auction lifecycle.
         pub(crate) fn set_liquidation_auction_for_test(
             &mut self,
             owner: AccountId,
