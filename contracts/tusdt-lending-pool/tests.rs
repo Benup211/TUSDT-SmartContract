@@ -919,6 +919,80 @@ fn zero_debt_by_default() {
 }
 
 // ---------------------------------------------------------------------------
+// Debt principal tracking
+// ---------------------------------------------------------------------------
+
+/// Grows a market's borrow index to `inner` (1e18 scale) for testing.
+fn set_borrow_index(pool: &mut TusdtLendingPool, market_id: u8, inner: u128) {
+    let mut state = pool.get_market_state(market_id).unwrap();
+    state.borrow_index = Ratio::from_inner(inner);
+    pool.debug_set_market_state(market_id, state);
+}
+
+#[ink::test]
+fn debt_details_zero_for_empty_position() {
+    let (pool, accounts) = setup();
+    assert_eq!(pool.get_user_debt_details(0, accounts.alice), Some((0, 0)));
+}
+
+#[ink::test]
+fn debt_details_splits_principal_and_interest() {
+    let (mut pool, accounts) = setup();
+    // Borrowed 100 at index 1.0 — no interest yet.
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 100,
+            alpha_principal: 0,
+        },
+    );
+    pool.debug_set_debt_principal(0, accounts.alice, 100);
+    assert_eq!(pool.get_user_debt_details(0, accounts.alice), Some((100, 100)));
+
+    // Index grows +10% (as accrue_interest would): debt grows, principal does not.
+    set_borrow_index(&mut pool, 0, 1_100_000_000_000_000_000);
+    assert_eq!(pool.get_user_debt_details(0, accounts.alice), Some((110, 100)));
+}
+
+#[ink::test]
+fn debt_details_legacy_position_falls_back_to_scaled_debt() {
+    let (mut pool, accounts) = setup();
+    // Legacy position: no tracked principal, borrowed at index 1.25.
+    // scaled_debt = 80 → debt = 100. Principal estimate = scaled_debt = 80.
+    pool.debug_set_position(
+        1,
+        accounts.bob,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 80,
+            alpha_principal: 0,
+        },
+    );
+    set_borrow_index(&mut pool, 1, 1_250_000_000_000_000_000);
+    assert_eq!(pool.get_user_debt_details(1, accounts.bob), Some((100, 80)));
+}
+
+#[ink::test]
+fn debt_details_never_reports_negative_interest() {
+    let (mut pool, accounts) = setup();
+    // Tracked principal above debt must clamp: interest is never negative.
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position {
+            ltoken_balance: 0,
+            scaled_debt: 100,
+            alpha_principal: 0,
+        },
+    );
+    pool.debug_set_debt_principal(0, accounts.alice, 150);
+    set_borrow_index(&mut pool, 0, 1_000_000_000_000_000_000);
+    assert_eq!(pool.get_user_debt_details(0, accounts.alice), Some((100, 100)));
+}
+
+// ---------------------------------------------------------------------------
 // Alpha yield index
 // ---------------------------------------------------------------------------
 

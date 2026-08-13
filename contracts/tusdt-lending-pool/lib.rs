@@ -291,6 +291,11 @@ mod lending_pool {
         positions: Mapping<(u8, AccountId), Position>,
         /// Position keys for paginated enumeration.
         position_keys: StorageVec<(u8, AccountId)>,
+        /// Outstanding debt principal per (market, user) in underlying units.
+        /// Interest owed = current debt − debt_principal. Kept in its own
+        /// mapping (not inside `Position`) so the stored `Position` layout
+        /// stays unchanged and any existing positions remain decodable.
+        debt_principal: Mapping<(u8, AccountId), Balance>,
     }
 
     /// Default interest-rate parameters for the TAO supply/borrow market.
@@ -822,6 +827,7 @@ mod lending_pool {
                 netuid_yield_index: Mapping::default(),
                 positions: Mapping::default(),
                 position_keys: StorageVec::new(),
+                debt_principal: Mapping::default(),
             }
         }
 
@@ -880,6 +886,7 @@ mod lending_pool {
                 netuid_yield_index: Mapping::default(),
                 positions: Mapping::default(),
                 position_keys: StorageVec::new(),
+                debt_principal: Mapping::default(),
             }
         }
     }
@@ -1963,6 +1970,9 @@ mod lending_pool {
                 alpha_principal: 0,
             });
             pos.scaled_debt = pos.scaled_debt.checked_add(scaled).ok_or(Error::ArithmeticError)?;
+            let principal = self.debt_principal.get((0, caller)).unwrap_or(0);
+            self.debt_principal
+                .insert((0, caller), &principal.checked_add(amount).ok_or(Error::ArithmeticError)?);
             self.positions.insert((0, caller), &pos);
             self.update_position_key(0, caller);
 
@@ -2036,6 +2046,9 @@ mod lending_pool {
                 alpha_principal: 0,
             });
             pos.scaled_debt = pos.scaled_debt.checked_add(scaled).ok_or(Error::ArithmeticError)?;
+            let principal = self.debt_principal.get((1, caller)).unwrap_or(0);
+            self.debt_principal
+                .insert((1, caller), &principal.checked_add(amount).ok_or(Error::ArithmeticError)?);
             self.positions.insert((1, caller), &pos);
             self.update_position_key(1, caller);
 
@@ -2111,6 +2124,8 @@ mod lending_pool {
             let mut pos = pos;
             pos.scaled_debt =
                 pos.scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
+            let principal = self.debt_principal.get((0, caller)).unwrap_or(0);
+            self.debt_principal.insert((0, caller), &principal.saturating_sub(repay_amount));
             self.positions.insert((0, caller), &pos);
             self.update_position_key(0, caller);
 
@@ -2179,6 +2194,8 @@ mod lending_pool {
             let mut pos = pos;
             pos.scaled_debt =
                 pos.scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
+            let principal = self.debt_principal.get((1, caller)).unwrap_or(0);
+            self.debt_principal.insert((1, caller), &principal.saturating_sub(repay_amount));
             self.positions.insert((1, caller), &pos);
             self.update_position_key(1, caller);
 
@@ -2558,6 +2575,9 @@ mod lending_pool {
             let mut pos = pos;
             pos.scaled_debt =
                 pos.scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
+            let principal = self.debt_principal.get((debt_market, borrower)).unwrap_or(0);
+            self.debt_principal
+                .insert((debt_market, borrower), &principal.saturating_sub(actual_debt_units));
             self.positions.insert((debt_market, borrower), &pos);
             self.update_position_key(debt_market, borrower);
 
@@ -3256,6 +3276,41 @@ mod lending_pool {
                 .and_then(|v| Balance::try_from(v).ok())
         }
 
+        /// Returns a user's debt breakdown in a market as `(debt, principal)`
+        /// in underlying units. `debt` includes accrued interest; `principal`
+        /// is the borrow principal not yet repaid. Interest owed = debt −
+        /// principal. Positions created before principal tracking existed
+        /// fall back to treating `scaled_debt` as principal (exact when
+        /// borrowed at borrow_index = 1.0, otherwise a slight under-estimate
+        /// of principal / over-estimate of interest).
+        #[ink(message)]
+        pub fn get_user_debt_details(
+            &self,
+            market_id: u8,
+            user: AccountId,
+        ) -> Option<(Balance, Balance)> {
+            let pos = self.positions.get((market_id, user)).unwrap_or(Position {
+                ltoken_balance: 0,
+                scaled_debt: 0,
+                alpha_principal: 0,
+            });
+            let state = self.markets.get(market_id)?;
+            let debt = if pos.scaled_debt == 0 {
+                0
+            } else {
+                state
+                    .borrow_index
+                    .checked_mul_value(pos.scaled_debt.into())
+                    .and_then(|v| Balance::try_from(v).ok())?
+            };
+            let tracked = self.debt_principal.get((market_id, user)).unwrap_or(0);
+            // For tracked positions scaled_debt ≤ principal always (index ≥ 1),
+            // so the max is exact. For legacy positions it estimates principal
+            // as the scaled debt. Clamp to debt so interest is never negative.
+            let principal = min(tracked.max(pos.scaled_debt), debt);
+            Some((debt, principal))
+        }
+
         /// Returns all approved alpha markets as `(netuid, params)` pairs.
         #[ink(message)]
         pub fn get_alpha_markets(&self) -> Vec<(u16, AlphaMarketParams)> {
@@ -3522,12 +3577,28 @@ mod lending_pool {
                 netuid_yield_index: Mapping::default(),
                 positions: Mapping::default(),
                 position_keys: StorageVec::new(),
+                debt_principal: Mapping::default(),
             }
         }
 
         /// Test-only: directly set a position in the mapping.
         pub(crate) fn debug_set_position(&mut self, market_id: u8, user: AccountId, pos: Position) {
             self.positions.insert((market_id, user), &pos);
+        }
+
+        /// Test-only: directly set the tracked debt principal for a position.
+        pub(crate) fn debug_set_debt_principal(
+            &mut self,
+            market_id: u8,
+            user: AccountId,
+            principal: Balance,
+        ) {
+            self.debt_principal.insert((market_id, user), &principal);
+        }
+
+        /// Test-only: directly set a market's state (e.g. to simulate a grown borrow index).
+        pub(crate) fn debug_set_market_state(&mut self, market_id: u8, state: MarketState) {
+            self.markets.insert(market_id, &state);
         }
 
         /// Test-only: push a key into position_keys (simulates legacy
