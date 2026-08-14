@@ -5,6 +5,14 @@ homepage = ""
 repository = ""
 edition = "2021"
 
+# workspace-wide. Contracts that cannot meet a lint must allow it at the
+# narrowest possible scope with a comment justifying why it is unreachable.
+[workspace.lints.clippy]
+arithmetic-side-effects = "deny"
+unwrap-used = "deny"
+expect-used = "deny"
+indexing-slicing = "deny"
+
 [profile.release]
 overflow-checks = true
 
@@ -13,6 +21,7 @@ members = [
     "env",
     "primitives",
     "voting",
+    "test-support",
     "contracts/tusdt-erc20",
     "contracts/tusdt-auction",
     "contracts/tusdt-oracle",

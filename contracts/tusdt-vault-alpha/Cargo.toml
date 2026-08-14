@@ -13,6 +13,9 @@ tusdt-erc20 = { path = "../tusdt-erc20", default-features = false, features = ["
 tusdt-auction = { path = "../tusdt-auction", default-features = false, features = ["ink-as-dependency"] }
 tusdt-oracle = { path = "../tusdt-oracle", default-features = false, features = ["ink-as-dependency"] }
 
+[dev-dependencies]
+tusdt-test-support = { path = "../../test-support" }
+
 [lib]
 path = "lib.rs"
 
@@ -28,3 +31,9 @@ std = [
 ]
 ink-as-dependency = []
 e2e-tests = []
+
+[lints.clippy]
+arithmetic-side-effects = "deny"
+unwrap-used = "deny"
+expect-used = "deny"
+indexing-slicing = "deny"

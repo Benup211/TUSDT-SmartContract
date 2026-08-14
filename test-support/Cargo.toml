@@ -1,0 +1,17 @@
+[package]
+name = "tusdt-test-support"
+version = "0.1.0"
+edition = "2021"
+authors = ["tensorusd admin@tensorusd.com"]
+license = "MIT-0"
+
+[dependencies]
+ink = { workspace = true }
+tusdt-env = { path = "../env", default-features = false }
+
+[features]
+default = ["std"]
+std = ["ink/std", "tusdt-env/std"]
+
+[lints]
+workspace = true

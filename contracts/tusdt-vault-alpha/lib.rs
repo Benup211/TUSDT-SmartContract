@@ -18,9 +18,9 @@ mod vault {
     use tusdt_primitives::Ratio;
 
     const PAGE_SIZE: u32 = 10;
-    /// Standard timelock (60 seconds) that scheduled contract and global parameter updates
+    /// Standard timelock (24 hours) that scheduled contract and global parameter updates
     /// must wait before they can be executed.
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
 
     mod params {
         include!("params.rs");
@@ -1610,8 +1610,8 @@ mod vault {
 
             let mut vaults = Vec::new();
             for index in start..end {
-                let vault = self.vaults.get((owner, index));
-                vaults.push(vault.expect("should be present"));
+                let vault = self.vaults.get((owner, index)).ok_or(Error::VaultNotFound)?;
+                vaults.push(vault);
             }
 
             Ok(vaults)
@@ -1629,9 +1629,9 @@ mod vault {
 
             let mut vaults = Vec::new();
             for index in start..end {
-                let key = self.vault_keys.get(index).expect("should be present");
-                let vault = self.vaults.get(key);
-                vaults.push(vault.expect("should be present"));
+                let key = self.vault_keys.get(index).ok_or(Error::VaultNotFound)?;
+                let vault = self.vaults.get(key).ok_or(Error::VaultNotFound)?;
+                vaults.push(vault);
             }
 
             Ok(vaults)

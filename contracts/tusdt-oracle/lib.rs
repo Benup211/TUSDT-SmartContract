@@ -424,13 +424,13 @@ mod oracle {
 
             let mut history = Vec::new();
             for offset in start..end {
-                let round_id = latest_round_id
-                    .checked_sub(offset)
-                    .expect("round id should exist within computed history page");
-                let price_data = self
-                    .committed_round_prices
-                    .get(round_id)
-                    .expect("committed round price should exist");
+                // Skip entries that don't exist — never trap a read path.
+                let Some(round_id) = latest_round_id.checked_sub(offset) else {
+                    continue;
+                };
+                let Some(price_data) = self.committed_round_prices.get(round_id) else {
+                    continue;
+                };
                 history.push(price_data);
             }
 
@@ -444,14 +444,13 @@ mod oracle {
             let mut submissions = Vec::with_capacity(reporter_count as usize);
 
             for index in 0..reporter_count {
-                let reporter = self
-                    .round_reporters
-                    .get((round_id, index))
-                    .expect("reporter should exist for round");
-                let submission = self
-                    .round_submissions
-                    .get((round_id, reporter))
-                    .expect("submission should exist for reporter");
+                // Skip inconsistent entries — never trap a read path.
+                let Some(reporter) = self.round_reporters.get((round_id, index)) else {
+                    continue;
+                };
+                let Some(submission) = self.round_submissions.get((round_id, reporter)) else {
+                    continue;
+                };
                 submissions.push(submission);
             }
 
@@ -606,14 +605,12 @@ mod oracle {
 
             let mut prices = Vec::with_capacity(reporter_count as usize);
             for index in 0..reporter_count {
-                let reporter = self
-                    .round_reporters
-                    .get((round_id, index))
-                    .expect("reporter should exist for round");
+                let reporter =
+                    self.round_reporters.get((round_id, index)).ok_or(Error::MedianUnavailable)?;
                 let submission = self
                     .round_submissions
                     .get((round_id, reporter))
-                    .expect("submission should exist for reporter");
+                    .ok_or(Error::MedianUnavailable)?;
                 prices.push(submission.price);
             }
 

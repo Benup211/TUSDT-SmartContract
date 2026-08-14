@@ -6992,6 +6992,7 @@ dependencies = [
  "tusdt-env",
  "tusdt-erc20",
  "tusdt-primitives",
+ "tusdt-test-support",
 ]
 
 [[package]]
@@ -7001,6 +7002,7 @@ dependencies = [
  "ink",
  "ink_e2e",
  "tusdt-env",
+ "tusdt-test-support",
  "tusdt-voting",
 ]
 
@@ -7019,6 +7021,7 @@ dependencies = [
  "ink",
  "ink_e2e",
  "tusdt-env",
+ "tusdt-test-support",
 ]
 
 [[package]]
@@ -7033,6 +7036,7 @@ dependencies = [
  "tusdt-lending-pool",
  "tusdt-oracle",
  "tusdt-primitives",
+ "tusdt-test-support",
  "tusdt-treasury",
  "tusdt-vault-alpha",
  "tusdt-voting",
@@ -7047,6 +7051,7 @@ dependencies = [
  "tusdt-erc20",
  "tusdt-oracle",
  "tusdt-primitives",
+ "tusdt-test-support",
 ]
 
 [[package]]
@@ -7057,6 +7062,7 @@ dependencies = [
  "ink_e2e",
  "tusdt-env",
  "tusdt-primitives",
+ "tusdt-test-support",
 ]
 
 [[package]]
@@ -7068,6 +7074,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "tusdt-test-support"
+version = "0.1.0"
+dependencies = [
+ "ink",
+ "tusdt-env",
+]
+
+[[package]]
 name = "tusdt-treasury"
 version = "0.1.0"
 dependencies = [
@@ -7075,6 +7089,7 @@ dependencies = [
  "ink_e2e",
  "tusdt-env",
  "tusdt-erc20",
+ "tusdt-test-support",
 ]
 
 [[package]]
@@ -7087,6 +7102,7 @@ dependencies = [
  "tusdt-erc20",
  "tusdt-oracle",
  "tusdt-primitives",
+ "tusdt-test-support",
 ]
 
 [[package]]

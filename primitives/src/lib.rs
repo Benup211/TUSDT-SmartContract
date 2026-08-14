@@ -54,12 +54,12 @@ impl Ratio {
     }
 
     /// Creates a `Ratio` from a `u128` integer (maps to value × `FixedU128::DIV`).
+    ///
+    /// Saturates instead of panicking: a value so large that `value × 1e18`
+    /// overflows `u128` clamps to the maximum representable ratio. Unreachable
+    /// for any `Balance` (u64) derived input, which caps at ~1.8e19 < 3.4e20.
     pub fn from_integer(value: u128) -> Self {
-        Self(
-            FixedU128::checked_from_integer(value)
-                .expect("integer ratio should fit in fixed-point representation")
-                .into_inner(),
-        )
+        Self(FixedU128::saturating_from_integer(value).into_inner())
     }
 
     /// Creates a `Ratio` from a percentage (p / 100).
@@ -186,3 +186,6 @@ pub fn pow_fixed(mut base: FixedU128, mut exponent: u128) -> Option<FixedU128> {
 
     Some(result)
 }
+
+#[cfg(test)]
+mod tests;

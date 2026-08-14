@@ -1,7 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 // Tests use ergonomic plain arithmetic on bounded constants; the strict numeric lints aren't
 // useful here and would just clutter assertions.
 #![allow(
-    clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
@@ -13,6 +18,7 @@ use super::governance::*;
 use ink::prelude::string::String;
 use ink::prelude::vec::Vec;
 use tusdt_primitives::Ratio;
+use tusdt_test_support::set_caller;
 use tusdt_treasury::{Fund, TokenKind};
 use tusdt_vault_alpha::VaultGlobalParamsConfig;
 
@@ -29,12 +35,6 @@ const IN_WINDOW_TS: u64 = 22 * MS_PER_DAY;
 
 fn set_block_timestamp(ts: u64) {
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(ts);
-}
-
-fn set_caller(caller: ink::primitives::AccountId) {
-    let callee = ink::env::account_id::<tusdt_env::CustomEnvironment>();
-    ink::env::test::set_callee::<tusdt_env::CustomEnvironment>(callee);
-    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(caller);
 }
 
 /// Constructs governance with the test clock/stake set, but no snapshot submitted yet.

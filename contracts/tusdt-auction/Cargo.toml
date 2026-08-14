@@ -15,6 +15,7 @@ tusdt-erc20 = { path = "../tusdt-erc20", default-features = false, features = [
 
 [dev-dependencies]
 ink_e2e = { workspace = true }
+tusdt-test-support = { path = "../../test-support" }
 
 [lib]
 path = "lib.rs"
@@ -24,3 +25,9 @@ default = ["std"]
 std = ["ink/std", "tusdt-env/std", "tusdt-primitives/std", "tusdt-erc20/std"]
 ink-as-dependency = []
 e2e-tests = []
+
+[lints.clippy]
+arithmetic-side-effects = "deny"
+unwrap-used = "deny"
+expect-used = "deny"
+indexing-slicing = "deny"

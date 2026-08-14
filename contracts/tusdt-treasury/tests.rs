@@ -1,3 +1,10 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use super::treasury::{
     split_delta, BUYBACK_BPS, DIVIDEND_BPS, EMERGENCY_BPS, INSURANCE_BPS, OPERATION_BPS, TOTAL_BPS,
     VOTING_BPS,

@@ -1,6 +1,15 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use super::vault::*;
 use ink::env::test;
-use tusdt_env::StakeInfo;
+use tusdt_test_support::{
+    register_mock, register_mock_no_stake, register_mock_transfer_fails, set_caller,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -8,12 +17,6 @@ use tusdt_env::StakeInfo;
 
 fn default_accounts() -> test::DefaultAccounts<tusdt_env::CustomEnvironment> {
     test::default_accounts::<tusdt_env::CustomEnvironment>()
-}
-
-fn set_caller(caller: ink::primitives::AccountId) {
-    let callee = ink::env::account_id::<tusdt_env::CustomEnvironment>();
-    ink::env::test::set_callee::<tusdt_env::CustomEnvironment>(callee);
-    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(caller);
 }
 
 fn setup() -> (TusdtVaultAlpha, test::DefaultAccounts<tusdt_env::CustomEnvironment>) {
@@ -41,99 +44,6 @@ fn set_vault_creation_fee_to_zero(vault: &mut TusdtVaultAlpha) {
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(24 * 60 * 60 * 1_000 + 1);
     vault.execute_global_params_update().unwrap();
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(0);
-}
-
-// ---------------------------------------------------------------------------
-// Chain-extension mock
-// ---------------------------------------------------------------------------
-
-struct MockExtension {
-    stake: Option<u64>,
-    should_fail: bool,
-    /// When set, the caller-forwarded stake pull (func 25) reports a write failure.
-    transfer_fails: bool,
-}
-
-impl test::ChainExtension for MockExtension {
-    fn ext_id(&self) -> u16 {
-        0x1000
-    }
-
-    fn call(&mut self, func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
-        if self.should_fail {
-            return 1;
-        }
-        match func_id {
-            0 => {
-                // get_stake_info_for_hotkey_coldkey_netuid
-                let info = self.stake.map(|stake| StakeInfo {
-                    hotkey: default_accounts().bob,
-                    coldkey: default_accounts().alice,
-                    netuid: ink::scale::Compact(1),
-                    stake: ink::scale::Compact(stake),
-                    locked: ink::scale::Compact(0),
-                    emission: ink::scale::Compact(0),
-                    tao_emission: ink::scale::Compact(0),
-                    drain: ink::scale::Compact(0),
-                    is_registered: true,
-                });
-                ink::scale::Encode::encode_to(&info, output);
-                0
-            },
-            15 => {
-                // get_alpha_price — 1_000_000_000 = 1 alpha = 1 TAO
-                let price: u64 = 1_000_000_000;
-                ink::scale::Encode::encode_to(&price, output);
-                0
-            },
-            // 36 = get_stake_availability
-            36 => {
-                let availability = tusdt_env::StakeAvailability {
-                    netuid: 1,
-                    total: self.stake.unwrap_or(0),
-                    locked: 0,
-                    available: self.stake.unwrap_or(0),
-                };
-                ink::scale::Encode::encode_to(&availability, output);
-                0
-            },
-            // Write ops (2 = remove_stake, 5 = move_stake, 6 = transfer_stake) — no-op success
-            2 | 5 | 6 => 0,
-            // 25 = caller_transfer_stake (caller-forwarded pull) — honours transfer_fails
-            25 => {
-                if self.transfer_fails {
-                    2
-                } else {
-                    0
-                }
-            },
-            _ => 1,
-        }
-    }
-}
-
-fn register_mock(stake: u64) {
-    test::register_chain_extension(MockExtension {
-        stake: Some(stake),
-        should_fail: false,
-        transfer_fails: false,
-    });
-}
-
-fn register_mock_no_stake() {
-    test::register_chain_extension(MockExtension {
-        stake: None,
-        should_fail: false,
-        transfer_fails: false,
-    });
-}
-
-fn register_mock_transfer_fails(stake: u64) {
-    test::register_chain_extension(MockExtension {
-        stake: Some(stake),
-        should_fail: false,
-        transfer_fails: true,
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -665,6 +575,23 @@ fn execute_global_params_before_timelock_fails() {
 }
 
 #[ink::test]
+fn execute_global_params_at_60s_still_timelocked() {
+    // Regression pin: the timelock is 24 h — advancing one minute (the
+    // pre-24h timelock duration) must still be inside the window.
+    let (mut vault, accounts) = setup();
+    set_caller(accounts.alice);
+    let mut config = default_global_config();
+    config.transaction_fee = 50;
+    vault.set_global_params(config).unwrap();
+
+    set_time(60 * 1_000);
+    assert_eq!(
+        vault.execute_global_params_update(),
+        Err(Error::ContractParamsUpdateTimelockActive)
+    );
+}
+
+#[ink::test]
 fn execute_global_params_after_timelock_applies() {
     let (mut vault, accounts) = setup();
     set_caller(accounts.alice);
@@ -1150,4 +1077,20 @@ fn total_collateral_survives_ten_vaults_across_three_netuids() {
     // Final check: global total should still equal the running sum.
     assert_eq!(vault.get_total_collateral_balance(), running_sum);
     assert_eq!(vault.get_total_vaults_count(), 10);
+}
+
+// ---------------------------------------------------------------------------
+// Default parameter pinning
+// ---------------------------------------------------------------------------
+
+#[ink::test]
+fn default_contract_params_are_valid() {
+    let params = TusdtVaultAlpha::default_contract_params();
+    assert!(TusdtVaultAlpha::validate_contract_params(&params).is_ok());
+}
+
+#[ink::test]
+fn default_global_params_are_valid() {
+    let params = TusdtVaultAlpha::default_global_params();
+    assert!(TusdtVaultAlpha::validate_global_params(&params).is_ok());
 }

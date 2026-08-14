@@ -460,7 +460,7 @@ mod auction {
             self.active_vault_auction.remove((auction.vault_owner, auction.vault_id));
             self.remove_active_auction(auction_id)?;
 
-            let winner = auction.highest_bidder.expect("should have winner");
+            let winner = auction.highest_bidder.ok_or(Error::AuctionHasNoBids)?;
             let highest_bid = auction.highest_bid;
             let highest_bid_metadata = auction
                 .highest_bid_id
@@ -591,8 +591,8 @@ mod auction {
 
             let mut bids = Vec::new();
             for bid_id in start..end {
-                let bid = self.auction_bids.get((auction_id, bid_id));
-                bids.push(bid.expect("should be present"));
+                let bid = self.auction_bids.get((auction_id, bid_id)).ok_or(Error::BidNotFound)?;
+                bids.push(bid);
             }
 
             Ok(bids)
@@ -622,8 +622,8 @@ mod auction {
 
             let mut auctions = Vec::new();
             for auction_id in start..end {
-                let auction = self.auctions.get(auction_id);
-                auctions.push(auction.expect("should be present"));
+                let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
+                auctions.push(auction);
             }
 
             Ok(auctions)
@@ -641,8 +641,8 @@ mod auction {
 
             let mut auctions = Vec::new();
             for index in start..end {
-                let auction_id = self.active_auctions.get(index).expect("should be present");
-                let auction = self.auctions.get(auction_id).expect("should be present");
+                let auction_id = self.active_auctions.get(index).ok_or(Error::AuctionNotFound)?;
+                let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
                 auctions.push(auction);
             }
 

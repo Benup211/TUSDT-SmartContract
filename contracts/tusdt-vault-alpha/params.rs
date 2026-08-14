@@ -21,9 +21,18 @@ impl TusdtVaultAlpha {
             liquidation_ratio: Ratio::from_basis_points(DEFAULT_LIQUIDATION_RATIO_BASIS_POINTS),
             liquidation_fee: Ratio::from_basis_points(DEFAULT_LIQUIDATION_FEE_BASIS_POINTS),
         };
-        Self::validate_contract_params(&params)
-            .expect("default vault contract params should be valid");
+        // Defaults are pinned by the `default_contract_params_are_valid` unit test.
+        // debug_assert fails fast in dev/test builds without a runtime panic in release.
+        debug_assert!(Self::validate_contract_params(&params).is_ok());
         params
+    }
+
+    /// Converts a validated ratio to basis points. Validated ratios are capped
+    /// at 1_000_000% (100_000_000 bps), far below the u32 range, so this is
+    /// infallible — the fallback exists only to keep the conversion panic-free.
+    fn validated_ratio_to_bps(ratio: Ratio) -> u32 {
+        // bps = inner / 1e18 * 10_000 = inner / 1e14
+        u32::try_from(ratio.into_inner() / 100_000_000_000_000).unwrap_or(u32::MAX)
     }
 
     /// Converts an external bps-based `VaultContractParamsConfig` into internal
@@ -46,18 +55,9 @@ impl TusdtVaultAlpha {
         params: VaultContractParams,
     ) -> VaultContractParamsConfig {
         VaultContractParamsConfig {
-            collateral_ratio: params
-                .collateral_ratio
-                .to_basis_points()
-                .expect("stored collateral ratio should fit in u32 basis points"),
-            liquidation_ratio: params
-                .liquidation_ratio
-                .to_basis_points()
-                .expect("stored liquidation ratio should fit in u32 basis points"),
-            liquidation_fee: params
-                .liquidation_fee
-                .to_basis_points()
-                .expect("stored liquidation fee should fit in u32 basis points"),
+            collateral_ratio: Self::validated_ratio_to_bps(params.collateral_ratio),
+            liquidation_ratio: Self::validated_ratio_to_bps(params.liquidation_ratio),
+            liquidation_fee: Self::validated_ratio_to_bps(params.liquidation_fee),
         }
     }
 
@@ -97,8 +97,9 @@ impl TusdtVaultAlpha {
             max_oracle_age_ms: DEFAULT_MAX_ORACLE_AGE_MS,
             vault_creation_fee: DEFAULT_VAULT_CREATION_FEE,
         };
-        Self::validate_global_params(&params)
-            .expect("default vault global params should be valid");
+        // Defaults are pinned by the `default_global_params_are_valid` unit test.
+        // debug_assert fails fast in dev/test builds without a runtime panic in release.
+        debug_assert!(Self::validate_global_params(&params).is_ok());
         params
     }
 
@@ -121,10 +122,7 @@ impl TusdtVaultAlpha {
     /// `VaultGlobalParamsConfig` for external consumption.
     pub(crate) fn global_params_to_config(params: VaultGlobalParams) -> VaultGlobalParamsConfig {
         VaultGlobalParamsConfig {
-            transaction_fee: params
-                .transaction_fee
-                .to_basis_points()
-                .expect("stored transaction fee should fit in u32 basis points"),
+            transaction_fee: Self::validated_ratio_to_bps(params.transaction_fee),
             auction_duration_ms: params.auction_duration_ms,
             max_oracle_age_ms: params.max_oracle_age_ms,
             vault_creation_fee: params.vault_creation_fee,

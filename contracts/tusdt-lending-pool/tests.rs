@@ -1,9 +1,13 @@
+
 // Lending pool unit tests. Uses `#[ink::test]` with a mock chain extension.
 
 use super::lending_pool::*;
 use ink::env::test;
-use tusdt_env::StakeInfo;
 use tusdt_primitives::Ratio;
+use tusdt_test_support::{
+    register_mock, register_mock_chain_fails, register_mock_no_stake,
+    register_mock_transfer_fails, set_caller,
+};
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -11,12 +15,6 @@ use tusdt_primitives::Ratio;
 
 fn default_accounts() -> test::DefaultAccounts<tusdt_env::CustomEnvironment> {
     test::default_accounts::<tusdt_env::CustomEnvironment>()
-}
-
-fn set_caller(caller: ink::primitives::AccountId) {
-    let callee = ink::env::account_id::<tusdt_env::CustomEnvironment>();
-    ink::env::test::set_callee::<tusdt_env::CustomEnvironment>(callee);
-    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(caller);
 }
 
 fn setup() -> (
@@ -57,106 +55,6 @@ fn set_timelock_to_zero(pool: &mut TusdtLendingPool) {
     );
     pool.execute_global_params_update().unwrap();
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(0);
-}
-
-// ---------------------------------------------------------------------------
-// Chain-extension mock
-// ---------------------------------------------------------------------------
-
-struct MockExtension {
-    stake: Option<u64>,
-    should_fail: bool,
-    transfer_fails: bool,
-}
-
-impl test::ChainExtension for MockExtension {
-    fn ext_id(&self) -> u16 {
-        0x1000
-    }
-
-    fn call(&mut self, func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
-        if self.should_fail {
-            return 1; // ReadFailed
-        }
-        match func_id {
-            0 => {
-                // get_stake_info_for_hotkey_coldkey_netuid
-                let info = self.stake.map(|stake| StakeInfo {
-                    hotkey: default_accounts().bob,
-                    coldkey: default_accounts().alice,
-                    netuid: ink::scale::Compact(1),
-                    stake: ink::scale::Compact(stake),
-                    locked: ink::scale::Compact(0),
-                    emission: ink::scale::Compact(0),
-                    tao_emission: ink::scale::Compact(0),
-                    drain: ink::scale::Compact(0),
-                    is_registered: true,
-                });
-                ink::scale::Encode::encode_to(&info, output);
-                0
-            }
-            15 => {
-                // get_alpha_price — 1_000_000_000 = 1 alpha = 1 TAO
-                let price: u64 = 1_000_000_000;
-                ink::scale::Encode::encode_to(&price, output);
-                0
-            }
-            36 => {
-                // get_stake_availability
-                let availability = tusdt_env::StakeAvailability {
-                    netuid: 1,
-                    total: self.stake.unwrap_or(0),
-                    locked: 0,
-                    available: self.stake.unwrap_or(0),
-                };
-                ink::scale::Encode::encode_to(&availability, output);
-                0
-            }
-            // Write ops (2 = remove_stake, 5 = move_stake, 6 = transfer_stake) — no-op success
-            2 | 5 | 6 => 0,
-            // 25 = caller_transfer_stake
-            25 => {
-                if self.transfer_fails {
-                    2 // WriteFailed
-                } else {
-                    0
-                }
-            }
-            _ => 1,
-        }
-    }
-}
-
-fn register_mock(stake: u64) {
-    test::register_chain_extension(MockExtension {
-        stake: Some(stake),
-        should_fail: false,
-        transfer_fails: false,
-    });
-}
-
-fn register_mock_no_stake() {
-    test::register_chain_extension(MockExtension {
-        stake: None,
-        should_fail: false,
-        transfer_fails: false,
-    });
-}
-
-fn register_mock_transfer_fails() {
-    test::register_chain_extension(MockExtension {
-        stake: Some(1_000),
-        should_fail: false,
-        transfer_fails: true,
-    });
-}
-
-fn register_mock_chain_fails() {
-    test::register_chain_extension(MockExtension {
-        stake: Some(1_000),
-        should_fail: true,
-        transfer_fails: false,
-    });
 }
 
 // ---------------------------------------------------------------------------
@@ -739,6 +637,31 @@ fn schedule_and_execute_global_params() {
 }
 
 #[ink::test]
+fn execute_global_params_at_60s_still_timelocked() {
+    // Regression pin: the timelock is 24 h — advancing 60 s (the old
+    // timelock duration) must still be inside the window.
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    let config = PoolGlobalParamsConfig {
+        max_oracle_age_ms: 3_600_000,
+        close_factor: 4000,
+        performance_fee: 2000,
+        supply_cap_tao: 0,
+        supply_cap_tusdt: 0,
+        borrow_cap_tao: 0,
+        borrow_cap_tusdt: 0,
+    };
+    pool.set_global_params(config).unwrap();
+
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(60 * 1_000);
+    assert_eq!(
+        pool.execute_global_params_update(),
+        Err(Error::ParamsUpdateTimelockActive)
+    );
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(0);
+}
+
+#[ink::test]
 fn cancel_global_params_update() {
     let (mut pool, accounts) = setup();
     set_caller(accounts.alice);
@@ -839,7 +762,7 @@ fn deposit_alpha_rejects_unapproved_netuid() {
 fn deposit_alpha_fails_on_transfer_failure() {
     let (mut pool, accounts) = setup_with_alpha(1);
     set_caller(accounts.alice);
-    register_mock_transfer_fails();
+    register_mock_transfer_fails(1_000);
     assert_eq!(
         pool.deposit_alpha(1, 500),
         Err(Error::StakeTransferFailed)
@@ -1602,4 +1525,55 @@ fn borrow_scaling_divides_amount_by_borrow_index() {
         .checked_div_value(scaled)
         .expect("repay scaling must not overflow");
     assert_eq!(scaled_repaid, amount, "repay full debt → scaled_repaid == scaled debt");
+}
+
+#[ink::test]
+fn accrual_produces_interest_after_an_hour() {
+    // Regression: the hourly-rate divisor was double-scaled
+    // (`checked_div_int(hours_per_year.into_inner())` = 8760 × 1e18), which
+    // overflowed u128 and reverted every accrual with `ArithmeticError` once
+    // dt_hours ≥ 1 — freezing interest and breaking borrow/repay/supply.
+    // Market 0 (TAO) is used because market_cash needs no cross-contract call
+    // in the off-chain env; the accrual path under test is shared.
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+
+    let debt: u64 = 128_000_000_000; // 128 TAO (9 decimals)
+    pool.debug_set_market_state(
+        0,
+        MarketState {
+            total_supplied: 130_000_000_000,
+            total_debt: debt,
+            borrow_index: Ratio::one(),
+            exchange_rate: Ratio::one(),
+            reserve_accrued: 0,
+            last_update: 0,
+        },
+    );
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position { ltoken_balance: 0, scaled_debt: debt, alpha_principal: 0 },
+    );
+    pool.debug_set_debt_principal(0, accounts.alice, debt);
+
+    // Advance one hour so the accrual path runs with dt_hours = 1.
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
+        tusdt_primitives::MILLISECONDS_PER_HOUR + 1,
+    );
+
+    pool.accrue_interest(0).unwrap();
+
+    let index = pool.get_borrow_index(0).unwrap();
+    assert!(
+        index.into_inner() > Ratio::one().into_inner(),
+        "borrow index should grow after an hour of debt: {}",
+        index.into_inner()
+    );
+
+    let (now_debt, principal) = pool.get_user_debt_details(0, accounts.alice).unwrap();
+    assert!(
+        now_debt > principal,
+        "interest should accrue: debt={now_debt} principal={principal}"
+    );
 }
