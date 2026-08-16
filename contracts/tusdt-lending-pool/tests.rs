@@ -1528,6 +1528,142 @@ fn borrow_scaling_divides_amount_by_borrow_index() {
 }
 
 #[ink::test]
+fn repay_clamps_to_market_total_debt_when_ledger_drifted() {
+    // Regression: with total_debt below the user's position debt (ledger drift
+    // from the historical reversed-division bug), repaying the user's full debt
+    // underflowed `total_debt.checked_sub` into ArithmeticError. The repay now
+    // clamps to the market total; a zero clamped amount is a clean no-op that
+    // happens before the token pull.
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+
+    pool.debug_set_market_state(
+        1,
+        MarketState {
+            total_supplied: 129_000_000_000,
+            total_debt: 0, // fully drained by drift
+            borrow_index: Ratio::one(),
+            exchange_rate: Ratio::one(),
+            reserve_accrued: 0,
+            last_update: 0,
+        },
+    );
+    pool.debug_set_position(
+        1,
+        accounts.alice,
+        Position { ltoken_balance: 0, scaled_debt: 12, alpha_principal: 0 },
+    );
+    pool.debug_set_debt_principal(1, accounts.alice, 12);
+
+    // Repaying the full debt against an empty market total must not underflow:
+    // it clamps to zero and no-ops before touching the token contract.
+    assert_eq!(pool.repay_tusdt(12), Ok(()));
+
+    let state = pool.get_market_state(1).unwrap();
+    assert_eq!(state.total_debt, 0, "no debt should have been deducted");
+    let (debt, principal) = pool.get_user_debt_details(1, accounts.alice).unwrap();
+    assert_eq!((debt, principal), (12, 12), "position untouched");
+}
+
+#[ink::test]
+fn repay_below_index_precision_is_rejected() {
+    // Regression: repaying less than one borrow-index unit cleared zero scaled
+    // debt while still decrementing total_debt — the repaid amount leaked from
+    // the market total without reducing the position's debt (the "small amount
+    // repay" bug).
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+
+    let index = Ratio::from_inner(1_000_160_150_930_897_932); // ~1.00016
+    pool.debug_set_market_state(
+        1,
+        MarketState {
+            total_supplied: 129_000_000_000,
+            total_debt: 4,
+            borrow_index: index,
+            exchange_rate: Ratio::one(),
+            reserve_accrued: 0,
+            last_update: 0,
+        },
+    );
+    pool.debug_set_position(
+        1,
+        accounts.alice,
+        Position { ltoken_balance: 0, scaled_debt: 12, alpha_principal: 0 },
+    );
+    pool.debug_set_debt_principal(1, accounts.alice, 12);
+
+    // 1 raw unit at index ~1.00016 floors to 0 scaled units.
+    assert_eq!(pool.repay_tusdt(1), Err(Error::ZeroAmount));
+
+    // The market total must not have been touched.
+    assert_eq!(pool.get_market_state(1).unwrap().total_debt, 4);
+}
+
+#[ink::test]
+fn accrue_market_interest_refreshes_both_markets_permissionlessly() {
+    // Permissionless refresh of both debt markets: market 0 accrues fully
+    // (borrow index grows) while market 1 (no debt) just bumps last_update.
+    // Market 1 avoids the cross-contract cash read in the off-chain env.
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.bob); // anyone, not governance
+
+    pool.debug_set_market_state(
+        0,
+        MarketState {
+            total_supplied: 130_000_000_000,
+            total_debt: 128_000_000_000,
+            borrow_index: Ratio::one(),
+            exchange_rate: Ratio::one(),
+            reserve_accrued: 0,
+            last_update: 0,
+        },
+    );
+    pool.debug_set_market_state(
+        1,
+        MarketState {
+            total_supplied: 129_000_000_000,
+            total_debt: 0,
+            borrow_index: Ratio::one(),
+            exchange_rate: Ratio::one(),
+            reserve_accrued: 0,
+            last_update: 0,
+        },
+    );
+
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
+        tusdt_primitives::MILLISECONDS_PER_HOUR + 1,
+    );
+
+    pool.accrue_market_interest().unwrap();
+
+    let m0 = pool.get_market_state(0).unwrap();
+    assert!(
+        m0.borrow_index.into_inner() > Ratio::one().into_inner(),
+        "market 0 borrow index should grow"
+    );
+    assert_eq!(m0.last_update, tusdt_primitives::MILLISECONDS_PER_HOUR + 1);
+
+    let m1 = pool.get_market_state(1).unwrap();
+    assert_eq!(m1.last_update, tusdt_primitives::MILLISECONDS_PER_HOUR + 1);
+
+    assert_eq!(
+        pool.get_last_interest_accrual_times(),
+        Some((
+            tusdt_primitives::MILLISECONDS_PER_HOUR + 1,
+            tusdt_primitives::MILLISECONDS_PER_HOUR + 1
+        ))
+    );
+}
+
+#[ink::test]
+fn get_last_interest_accrual_times_returns_both_markets() {
+    let (pool, _accounts) = setup();
+    // new_for_test seeds both debt markets with MarketState::new(0).
+    assert_eq!(pool.get_last_interest_accrual_times(), Some((0, 0)));
+}
+
+#[ink::test]
 fn accrual_produces_interest_after_an_hour() {
     // Regression: the hourly-rate divisor was double-scaled
     // (`checked_div_int(hours_per_year.into_inner())` = 8760 × 1e18), which

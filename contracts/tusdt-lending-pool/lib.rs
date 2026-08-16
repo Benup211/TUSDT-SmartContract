@@ -1387,6 +1387,38 @@ mod lending_pool {
                 return Ok(());
             }
 
+            // Respect the market's tracked total debt. Ledger drift from
+            // historical scaling bugs can leave total_debt below the sum of
+            // user positions; subtracting more would underflow into
+            // ArithmeticError.
+            let repay_amount = min(repay_amount, state.total_debt);
+            if repay_amount == 0 {
+                self.set_idle();
+                return Ok(());
+            }
+
+            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
+            // computes value / self, so the Ratio must be the borrow_index (divisor).
+            // A full repayment clears the position exactly, since floor division
+            // would otherwise strand the last sub-index unit of debt forever.
+            let scaled_repaid = if repay_amount >= debt {
+                pos.scaled_debt
+            } else {
+                state
+                    .borrow_index
+                    .checked_div_value(repay_amount.into())
+                    .and_then(|v| Balance::try_from(v).ok())
+                    .ok_or(Error::ArithmeticError)?
+            };
+            // A partial repayment below one borrow-index unit computes zero
+            // scaled units: it would decrement total_debt while the position's
+            // debt stays put, leaking that amount from the market total.
+            // Reject it instead.
+            if scaled_repaid == 0 {
+                self.set_idle();
+                return Err(Error::ZeroAmount);
+            }
+
             // Verify payment
             let received = self.env().transferred_value();
             if received < repay_amount {
@@ -1399,14 +1431,6 @@ mod lending_pool {
             }
 
             // Effects
-            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
-            // computes value / self, so the Ratio must be the borrow_index (divisor).
-            let scaled_repaid = state
-                .borrow_index
-                .checked_div_value(repay_amount.into())
-                .and_then(|v| Balance::try_from(v).ok())
-                .ok_or(Error::ArithmeticError)?;
-
             let mut state = state;
             state.total_debt =
                 state.total_debt.checked_sub(repay_amount).ok_or(Error::ArithmeticError)?;
@@ -1463,20 +1487,44 @@ mod lending_pool {
                 return Ok(());
             }
 
+            // Respect the market's tracked total debt. Ledger drift from
+            // historical scaling bugs can leave total_debt below the sum of
+            // user positions; subtracting more would underflow into
+            // ArithmeticError.
+            let repay_amount = min(repay_amount, state.total_debt);
+            if repay_amount == 0 {
+                self.set_idle();
+                return Ok(());
+            }
+
+            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
+            // computes value / self, so the Ratio must be the borrow_index (divisor).
+            // A full repayment clears the position exactly, since floor division
+            // would otherwise strand the last sub-index unit of debt forever.
+            let scaled_repaid = if repay_amount >= debt {
+                pos.scaled_debt
+            } else {
+                state
+                    .borrow_index
+                    .checked_div_value(repay_amount.into())
+                    .and_then(|v| Balance::try_from(v).ok())
+                    .ok_or(Error::ArithmeticError)?
+            };
+            // A partial repayment below one borrow-index unit computes zero
+            // scaled units: it would decrement total_debt while the position's
+            // debt stays put, leaking that amount from the market total.
+            // Reject it instead.
+            if scaled_repaid == 0 {
+                self.set_idle();
+                return Err(Error::ZeroAmount);
+            }
+
             // Pull TUSDT from caller
             self.tusdt
                 .transfer_from(caller, pool_addr, repay_amount)
                 .map_err(|_| Error::TokenTransferFromFailed)?;
 
             // Effects
-            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
-            // computes value / self, so the Ratio must be the borrow_index (divisor).
-            let scaled_repaid = state
-                .borrow_index
-                .checked_div_value(repay_amount.into())
-                .and_then(|v| Balance::try_from(v).ok())
-                .ok_or(Error::ArithmeticError)?;
-
             let mut state = state;
             state.total_debt =
                 state.total_debt.checked_sub(repay_amount).ok_or(Error::ArithmeticError)?;
@@ -1491,6 +1539,29 @@ mod lending_pool {
             self.update_position_key(1, caller);
 
             self.env().emit_event(Repaid { market: 1, user: caller, amount: repay_amount });
+
+            self.set_idle();
+            Ok(())
+        }
+
+        /// Accrues interest for both debt markets (0 = TAO, 1 = TUSDT) in a
+        /// single call. Permissionless — anyone may call it to refresh each
+        /// market's borrow index, exchange rate, and reserve against the time
+        /// elapsed since the last accrual, so off-chain debt calculations stay
+        /// in sync with the chain. No interest accrues for a market with no
+        /// debt or with less than one full hour elapsed (its last-update
+        /// timestamp still advances).
+        #[ink(message)]
+        pub fn accrue_market_interest(&mut self) -> Result<()> {
+            self.ensure_not_paused()?;
+
+            self.ensure_idle()?;
+            self.accrue_interest(0).inspect_err(|_| {
+                self.set_idle();
+            })?;
+            self.accrue_interest(1).inspect_err(|_| {
+                self.set_idle();
+            })?;
 
             self.set_idle();
             Ok(())
@@ -1792,6 +1863,10 @@ mod lending_pool {
             } else {
                 min(cover_tusdt, borrower_debt)
             };
+            // Respect the market's tracked total debt: never cover more debt
+            // than the market accounts for, or the subtraction underflows into
+            // ArithmeticError on a drifted ledger.
+            let actual_debt_units = min(actual_debt_units, state.total_debt);
             if actual_debt_units == 0 {
                 self.set_idle();
                 return Err(Error::ZeroAmount);
@@ -2450,6 +2525,17 @@ mod lending_pool {
         #[ink(message)]
         pub fn get_market_state(&self, market_id: u8) -> Option<MarketState> {
             self.markets.get(market_id)
+        }
+
+        /// Returns the last interest-accrual timestamp (block timestamp in ms)
+        /// for both debt markets as `(market 0, market 1)`, or `None` if either
+        /// market is missing. Together with `get_borrow_index`, the market
+        /// params, and each user's `scaled_debt` (via `get_all_positions`),
+        /// this lets clients compute any user's current debt with accrued
+        /// interest off-chain without a chain round-trip.
+        #[ink(message)]
+        pub fn get_last_interest_accrual_times(&self) -> Option<(u64, u64)> {
+            Some((self.markets.get(0)?.last_update, self.markets.get(1)?.last_update))
         }
 
         /// Returns the position of a user in a market, or `None` if it does not
