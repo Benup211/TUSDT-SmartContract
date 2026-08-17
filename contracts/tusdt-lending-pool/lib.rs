@@ -1669,8 +1669,10 @@ mod lending_pool {
         /// market's borrow index, exchange rate, and reserve against the time
         /// elapsed since the last accrual, so off-chain debt calculations stay
         /// in sync with the chain. No interest accrues for a market with no
-        /// debt or with less than one full hour elapsed (its last-update
-        /// timestamp still advances).
+        /// debt or with less than one full hour elapsed. A debt market
+        /// advances its last-update timestamp by whole hours only (the
+        /// sub-hour remainder is preserved); a debt-free market tracks the
+        /// latest write.
         #[ink(message)]
         pub fn accrue_market_interest(&mut self) -> Result<()> {
             self.ensure_not_paused()?;

@@ -26,8 +26,10 @@ impl TusdtLendingPool {
 
         /// Accrues interest for a supply/borrow market (0 = TAO, 1 = TUSDT); a
         /// no-op for alpha markets (id >= 2). Updates borrow index, exchange rate,
-        /// and reserve, and emits `MarketAccrued`. Errors: `Error::MarketNotFound`,
-        /// `Error::ArithmeticError`.
+        /// and reserve, and emits `MarketAccrued`. Charges only whole elapsed
+        /// hours and advances `last_update` by whole hours so the sub-hour
+        /// remainder is preserved (vault pattern). Errors:
+        /// `Error::MarketNotFound`, `Error::ArithmeticError`.
         pub(crate) fn accrue_interest(&mut self, market_id: u8) -> Result<()> {
             if market_id >= 2 {
                 return Ok(());
@@ -36,11 +38,20 @@ impl TusdtLendingPool {
             let mut state = self.markets.get(market_id).ok_or(Error::MarketNotFound)?;
             let dt_ms = now.checked_sub(state.last_update).ok_or(Error::ArithmeticError)?;
             let dt_hours = dt_ms / tusdt_primitives::MILLISECONDS_PER_HOUR;
-            if dt_hours == 0 || state.total_debt == 0 {
+            if state.total_debt == 0 {
+                // Nothing to accrue; keep the clock on real time. There is no
+                // debt whose sub-hour remainder could be starved.
                 if dt_ms > 0 {
                     state.last_update = now;
                     self.markets.insert(market_id, &state);
                 }
+                return Ok(());
+            }
+            if dt_hours == 0 {
+                // Live debt but less than one full hour elapsed: leave
+                // `last_update` untouched so the partial hour carries into
+                // the next accrual window instead of being discarded
+                // (vault pattern — whole-hours-only advance).
                 return Ok(());
             }
             let cash = self.market_cash(market_id)?;
@@ -97,7 +108,17 @@ impl TusdtLendingPool {
             state.exchange_rate = new_exchange_rate;
             state.reserve_accrued =
                 state.reserve_accrued.checked_add(reserve_delta).ok_or(Error::ArithmeticError)?;
-            state.last_update = now;
+            // Advance by whole hours only (vault pattern): the sub-hour
+            // remainder carries into the next accrual window instead of
+            // being discarded.
+            state.last_update = state
+                .last_update
+                .checked_add(
+                    dt_hours
+                        .checked_mul(tusdt_primitives::MILLISECONDS_PER_HOUR)
+                        .ok_or(Error::ArithmeticError)?,
+                )
+                .ok_or(Error::ArithmeticError)?;
             self.markets.insert(market_id, &state);
             self.env().emit_event(MarketAccrued {
                 market: market_id,

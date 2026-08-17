@@ -68,7 +68,7 @@ Interest accrues lazily on every state-changing call to a supply/borrow market
 (`accrue_interest`, `rates.rs`):
 
 ```
-dt_hours = dt_ms / 3_600_000          # sub-hour remainder is dropped
+dt_hours = dt_ms / 3_600_000          # whole hours only
 borrow_growth = (1 + r_annual / 8760)^dt_hours
 supply_growth = (1 + s_annual / 8760)^dt_hours
 ```
@@ -82,8 +82,15 @@ exchange_rate ← supply_growth · exchange_rate
 ```
 
 Rules: no accrual while `total_debt == 0`, and nothing accrues until a full hour has passed
-(`dt_hours == 0`) — the partial hour is discarded (timestamp still advances). Alpha markets
-(ids ≥ 2) skip accrual entirely.
+(`dt_hours == 0`). The clock advances **by whole hours only** (vault pattern): the sub-hour
+remainder carries into the next accrual window instead of being discarded, so frequent
+sub-hour writes can never starve a debt market of interest. A debt-free market tracks the
+latest write's timestamp. Alpha markets (ids ≥ 2) skip accrual entirely.
+
+> **Precision note:** all balances are `u64` rao (9 decimals), and every accrual floors to
+> whole rao. A dust debt (e.g. 2 rao) accrues less than 1 rao per hour at realistic rates, so
+> its displayed interest stays 0 for years — this is expected fixed-point flooring, not a bug.
+> Test interest accrual with realistic debt (≥ 1 TUSDT = 1e9 rao).
 
 ### Supply rate and the reserve
 

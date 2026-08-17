@@ -1643,7 +1643,9 @@ fn accrue_market_interest_refreshes_both_markets_permissionlessly() {
         m0.borrow_index.into_inner() > Ratio::one().into_inner(),
         "market 0 borrow index should grow"
     );
-    assert_eq!(m0.last_update, tusdt_primitives::MILLISECONDS_PER_HOUR + 1);
+    // Whole-hours-only advance (vault pattern): 1h+1ms elapsed charges one
+    // full hour, so last_update lands exactly on the hour boundary.
+    assert_eq!(m0.last_update, tusdt_primitives::MILLISECONDS_PER_HOUR);
 
     let m1 = pool.get_market_state(1).unwrap();
     assert_eq!(m1.last_update, tusdt_primitives::MILLISECONDS_PER_HOUR + 1);
@@ -1651,7 +1653,7 @@ fn accrue_market_interest_refreshes_both_markets_permissionlessly() {
     assert_eq!(
         pool.get_last_interest_accrual_times(),
         Some((
-            tusdt_primitives::MILLISECONDS_PER_HOUR + 1,
+            tusdt_primitives::MILLISECONDS_PER_HOUR,
             tusdt_primitives::MILLISECONDS_PER_HOUR + 1
         ))
     );
@@ -1712,6 +1714,58 @@ fn accrual_produces_interest_after_an_hour() {
     assert!(
         now_debt > principal,
         "interest should accrue: debt={now_debt} principal={principal}"
+    );
+}
+
+#[ink::test]
+fn sub_hour_remainder_is_not_discarded() {
+    // Regression: the no-op accrual path used to bump `last_update` to `now`
+    // whenever less than a full hour had elapsed, discarding the remainder —
+    // frequent sub-hour writes could starve a debt market of interest forever.
+    // The clock must only advance by whole hours (vault pattern).
+    // Market 0 (TAO) is used because market_cash needs no cross-contract call
+    // in the off-chain env; the accrual path under test is shared.
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+
+    let debt: u64 = 128_000_000_000; // 128 TAO (9 decimals)
+    pool.debug_set_market_state(
+        0,
+        MarketState {
+            total_supplied: 130_000_000_000,
+            total_debt: debt,
+            borrow_index: Ratio::one(),
+            exchange_rate: Ratio::one(),
+            reserve_accrued: 0,
+            last_update: 0,
+        },
+    );
+
+    // Write at t = 30 min: no full hour elapsed — no interest, and the clock
+    // must NOT advance (the 30-min remainder is preserved).
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
+        tusdt_primitives::MILLISECONDS_PER_HOUR / 2,
+    );
+    pool.accrue_interest(0).unwrap();
+    let s = pool.get_market_state(0).unwrap();
+    assert_eq!(s.last_update, 0, "sub-hour remainder must not be discarded");
+    assert_eq!(s.borrow_index, Ratio::one(), "no interest before a full hour");
+
+    // Write at t = 60 min: exactly one full hour has now elapsed.
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
+        tusdt_primitives::MILLISECONDS_PER_HOUR,
+    );
+    pool.accrue_interest(0).unwrap();
+    let s = pool.get_market_state(0).unwrap();
+    assert_eq!(
+        s.last_update,
+        tusdt_primitives::MILLISECONDS_PER_HOUR,
+        "clock must advance by the whole hour charged"
+    );
+    assert!(
+        s.borrow_index.into_inner() > Ratio::one().into_inner(),
+        "one full hour must accrue after two sub-hour writes: {}",
+        s.borrow_index.into_inner()
     );
 }
 

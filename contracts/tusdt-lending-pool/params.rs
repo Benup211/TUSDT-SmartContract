@@ -2,7 +2,7 @@ use super::*;
 
     /// Timelock delay (ms) that pending parameter updates must wait before
     /// they can be executed (24 hours).
-    pub(crate) const PARAMS_TIMELOCK_MS: u64 =  60 * 1_000;
+    pub(crate) const PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
 
     /// Per-market interest-rate parameters (internal, Ratio-based).
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
