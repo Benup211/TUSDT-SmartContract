@@ -140,12 +140,19 @@ impl TusdtLendingPool {
             }
         }
 
-        /// Returns the pool's physical cash for a market: the native balance for
-        /// TAO (market 0) and the pool's TUSDT balance for market 1. Errors:
-        /// `Error::MarketNotFound` for any other market.
+        /// Returns the pool's physical cash for a market: the native balance
+        /// plus any TAO staked on the root subnet for TAO (market 0) and the
+        /// pool's TUSDT balance for market 1. Root stake is 1:1 TAO with
+        /// synchronous unstake, so it counts as cash for liquidity checks and
+        /// the utilization denominator. Errors: `Error::MarketNotFound` for
+        /// any other market, `Error::ArithmeticError` on overflow.
         pub(crate) fn market_cash(&self, market_id: u8) -> Result<Balance> {
             match market_id {
-                0 => Ok(self.env().balance()),
+                0 => self
+                    .env()
+                    .balance()
+                    .checked_add(self.staked_tao)
+                    .ok_or(Error::ArithmeticError),
                 1 => Ok(self.tusdt.balance_of(self.env().account_id())),
                 _ => Err(Error::MarketNotFound),
             }

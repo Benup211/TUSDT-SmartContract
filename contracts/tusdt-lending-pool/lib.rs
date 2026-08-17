@@ -5,7 +5,8 @@
 /// Public re-exports of the lending pool's core types.
 pub use self::lending_pool::{
     AlphaMarketParams, AlphaMarketParamsConfig, InterestRateParams, InterestRateParamsConfig,
-    PoolGlobalParams, PoolGlobalParamsConfig, TusdtLendingPool, TusdtLendingPoolRef,
+    PoolGlobalParams, PoolGlobalParamsConfig, RootStakeConfig, TusdtLendingPool,
+    TusdtLendingPoolRef,
 };
 
 #[ink::contract(env = tusdt_env::CustomEnvironment)]
@@ -48,6 +49,12 @@ mod lending_pool {
     /// (100_000 in 9-decimal token units).
     #[allow(dead_code)]
     pub(crate) const MIN_STAKE: Balance = 100_000;
+
+    /// Minimum allowed `stake_floor` for root-subnet staking — the pallet's
+    /// minimum stake on the root subnet (0.002 TAO in 9-decimal units).
+    pub(crate) const MIN_ROOT_STAKE_FLOOR: Balance = 2_000_000;
+    /// Default `stake_buffer` for root-subnet staking (1 TAO kept liquid).
+    pub(crate) const DEFAULT_STAKE_BUFFER: Balance = 1_000_000_000;
 
     /// Which asset a user is interacting with.
     #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -107,6 +114,26 @@ mod lending_pool {
         /// Alpha principal units deposited (alpha markets only).
         /// Effective collateral = alpha_principal × netuid_yield_index.
         pub alpha_principal: Balance,
+    }
+
+    /// Governance configuration for idle-TAO root-subnet staking (mirrors the
+    /// `set_root_stake_config` message parameters and `get_root_stake_config`
+    /// return value).
+    #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+    #[ink::scale_derive(Encode, Decode, TypeInfo)]
+    #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
+    pub struct RootStakeConfig {
+        /// Hotkey the pool stakes idle TAO to on the root subnet (netuid 0).
+        pub root_hotkey: AccountId,
+        /// Emergency off-switch: when `false`, no new TAO is staked.
+        pub staking_enabled: bool,
+        /// Free native TAO the sweep must leave untouched.
+        pub stake_buffer: Balance,
+        /// Sweeps trigger only once the free balance exceeds buffer + threshold.
+        pub sweep_threshold: Balance,
+        /// Minimum stake amount (`>= MIN_ROOT_STAKE_FLOOR`); also the minimum
+        /// `stake_buffer`.
+        pub stake_floor: Balance,
     }
 
     /// Lending pool storage: roles, market state, user positions, and risk parameters.
@@ -170,6 +197,23 @@ mod lending_pool {
         /// mapping (not inside `Position`) so the stored `Position` layout
         /// stays unchanged and any existing positions remain decodable.
         debt_principal: Mapping<(u8, AccountId), Balance>,
+
+        // ── Idle TAO root-subnet staking ──
+        /// Hotkey the pool stakes idle TAO to on the root subnet (netuid 0).
+        root_hotkey: AccountId,
+        /// Booked TAO currently staked on the root subnet.
+        staked_tao: Balance,
+        /// Free native TAO the sweep leaves untouched (liquidity sleeve).
+        stake_buffer: Balance,
+        /// Sweeps trigger only once the free balance exceeds buffer + threshold.
+        sweep_threshold: Balance,
+        /// Minimum root stake amount (`>= MIN_ROOT_STAKE_FLOOR`), avoids dust.
+        stake_floor: Balance,
+        /// Block number of the last sweep (`None` = never swept; rate limit: 1
+        /// sweep per block).
+        last_sweep_block: Option<BlockNumber>,
+        /// Emergency off-switch: when `false`, no new TAO is staked.
+        staking_enabled: bool,
     }
 
     /// Events emitted by the lending pool.
@@ -498,6 +542,36 @@ mod lending_pool {
         pub amount: Balance,
     }
 
+    /// Emitted when idle TAO is staked onto the root subnet (netuid 0).
+    #[ink(event)]
+    pub struct StakedIdleTao {
+        /// TAO amount staked (9-decimal units).
+        pub amount: Balance,
+    }
+
+    /// Emitted when staked TAO is unstaked from the root subnet (netuid 0)
+    /// to cover an outflow.
+    #[ink(event)]
+    pub struct UnstakedIdleTao {
+        /// TAO amount received back into the free balance (9-decimal units).
+        pub amount: Balance,
+    }
+
+    /// Emitted when the root-subnet staking configuration is updated.
+    #[ink(event)]
+    pub struct RootStakeConfigUpdated {
+        /// Hotkey the pool stakes idle TAO to on the root subnet (netuid 0).
+        pub root_hotkey: AccountId,
+        /// Whether staking is enabled.
+        pub staking_enabled: bool,
+        /// Free native TAO the sweep leaves untouched.
+        pub stake_buffer: Balance,
+        /// Sweeps trigger only once the free balance exceeds buffer + threshold.
+        pub sweep_threshold: Balance,
+        /// Minimum root stake amount.
+        pub stake_floor: Balance,
+    }
+
     /// Emitted when the maintainer role is updated.
     #[ink(event)]
     pub struct PoolMaintainerUpdated {
@@ -654,6 +728,13 @@ mod lending_pool {
                 positions: Mapping::default(),
                 position_keys: StorageVec::new(),
                 debt_principal: Mapping::default(),
+                root_hotkey: pool_hotkey,
+                staked_tao: 0,
+                stake_buffer: DEFAULT_STAKE_BUFFER,
+                sweep_threshold: 0,
+                stake_floor: MIN_ROOT_STAKE_FLOOR,
+                last_sweep_block: None,
+                staking_enabled: false,
             }
         }
 
@@ -713,6 +794,13 @@ mod lending_pool {
                 positions: Mapping::default(),
                 position_keys: StorageVec::new(),
                 debt_principal: Mapping::default(),
+                root_hotkey: pool_hotkey,
+                staked_tao: 0,
+                stake_buffer: DEFAULT_STAKE_BUFFER,
+                sweep_threshold: 0,
+                stake_floor: MIN_ROOT_STAKE_FLOOR,
+                last_sweep_block: None,
+                staking_enabled: false,
             }
         }
     }
@@ -933,6 +1021,10 @@ mod lending_pool {
                 ltoken_scaled,
             });
 
+            // Best-effort: sweep excess idle TAO to the root subnet. Never reverts
+            // the supply itself.
+            let _ = self.sweep_to_root();
+
             self.set_idle();
             Ok(())
         }
@@ -1071,6 +1163,18 @@ mod lending_pool {
             if underlying > cash {
                 self.set_idle();
                 return Err(Error::LiquidityInsufficient);
+            }
+
+            // Top up the free sleeve from root stake if the free balance alone cannot
+            // cover the withdrawal (root unstake is synchronous and 1:1).
+            let free = self.env().balance();
+            if underlying > free {
+                let shortfall = underlying.checked_sub(free).ok_or(Error::ArithmeticError)?;
+                let received = self.top_up_free(shortfall)?;
+                if received < shortfall {
+                    self.set_idle();
+                    return Err(Error::LiquidityInsufficient);
+                }
             }
 
             // Note: TAO supply is NOT collateral, so no health check is needed here.
@@ -1223,6 +1327,18 @@ mod lending_pool {
             if amount > cash {
                 self.set_idle();
                 return Err(Error::LiquidityInsufficient);
+            }
+
+            // Top up the free sleeve from root stake if the free balance alone cannot
+            // cover the borrow (root unstake is synchronous and 1:1).
+            let free = self.env().balance();
+            if amount > free {
+                let shortfall = amount.checked_sub(free).ok_or(Error::ArithmeticError)?;
+                let received = self.top_up_free(shortfall)?;
+                if received < shortfall {
+                    self.set_idle();
+                    return Err(Error::LiquidityInsufficient);
+                }
             }
 
             // Health check: convert borrow amount to TUSDT equivalent
@@ -1447,6 +1563,10 @@ mod lending_pool {
             // Note: repaid TAO stays in pool as cash — no burn.
 
             self.env().emit_event(Repaid { market: 0, user: caller, amount: repay_amount });
+
+            // Best-effort: sweep excess idle TAO to the root subnet. Never reverts
+            // the repayment itself.
+            let _ = self.sweep_to_root();
 
             self.set_idle();
             Ok(())
@@ -2104,8 +2224,17 @@ mod lending_pool {
                 return Ok(());
             }
 
-            // Cap at physical cash available
-            let cash = self.market_cash(market_id)?;
+            // Cap at physical cash available. For TAO, only the free native balance
+            // counts — TAO staked on the root subnet is not claimable without an
+            // unstake, and reserve claims must never drain the liquidity sleeve.
+            let cash = match market_id {
+                0 => self.env().balance(),
+                1 => self.market_cash(1)?,
+                _ => {
+                    self.set_idle();
+                    return Err(Error::MarketNotFound);
+                },
+            };
             let claim = min(claimable, cash);
 
             state.reserve_accrued =
@@ -2501,20 +2630,172 @@ mod lending_pool {
             Ok(())
         }
 
-        /// Sweeps the pool's native TAO balance (minus the 1 existential deposit
-        /// guard) to the treasury. Maintainer only. Errors:
-        /// `Error::NotMaintainer`, `Error::TransferFailed`.
+        /// Sweeps the pool's native TAO balance to the treasury, minus the
+        /// root-staking liquidity sleeve (`stake_buffer`) and a 1-unit existential
+        /// deposit guard. Maintainer only. Errors: `Error::NotMaintainer`,
+        /// `Error::TransferFailed`.
         #[ink(message)]
         pub fn transfer_native_to_treasury(&mut self) -> Result<()> {
             self.ensure_maintainer()?;
-            let balance = self.env().balance();
-            if balance <= 1 {
-                return Ok(()); // keep 1 as existential deposit guard
-            }
-            let amount = balance.checked_sub(1).ok_or(Error::ArithmeticError)?;
+            let Some(amount) = self.treasury_sweepable() else {
+                return Ok(()); // nothing above the sleeve + ED guard to sweep
+            };
             self.env().transfer(self.treasury, amount).map_err(|_| Error::TransferFailed)?;
             self.env().emit_event(PoolNativeTransferredToTreasury { amount });
             Ok(())
+        }
+
+        /// Computes how much free TAO the treasury sweep may take: everything
+        /// above the root-staking liquidity sleeve (`stake_buffer`) minus a
+        /// 1-unit existential deposit guard. `None` when nothing may be swept.
+        pub(crate) fn treasury_sweepable(&self) -> Option<Balance> {
+            let sweepable = self.env().balance().saturating_sub(self.stake_buffer);
+            if sweepable <= 1 {
+                return None; // keep 1 as existential deposit guard
+            }
+            sweepable.checked_sub(1)
+        }
+
+        // ─────────────────────────────────────────────────────────────
+        // Idle TAO root-subnet staking
+        // ─────────────────────────────────────────────────────────────
+
+        /// Updates the idle-TAO root-subnet staking configuration. Governance only.
+        ///
+        /// Enforces two invariants: `stake_floor >= MIN_ROOT_STAKE_FLOOR` (the
+        /// pallet's minimum root stake) and `stake_buffer >= stake_floor` (the free
+        /// sleeve always keeps at least one staking unit liquid). If `staked_tao > 0`
+        /// and the hotkey changes, the pool fully unstakes its root position first so
+        /// the booking never references a stale hotkey. Errors: `Error::NotGovernance`,
+        /// `Error::InvalidParam`, `Error::LiquidityInsufficient` (when the required
+        /// unstake fails), `Error::ArithmeticError`.
+        #[ink(message)]
+        pub fn set_root_stake_config(
+            &mut self,
+            root_hotkey: AccountId,
+            staking_enabled: bool,
+            stake_buffer: Balance,
+            sweep_threshold: Balance,
+            stake_floor: Balance,
+        ) -> Result<()> {
+            self.ensure_governance()?;
+
+            // Invariants: floor >= pallet minimum, buffer >= floor.
+            if stake_floor < MIN_ROOT_STAKE_FLOOR || stake_buffer < stake_floor {
+                return Err(Error::InvalidParam);
+            }
+
+            // Hotkey rotation with stake outstanding: fully unstake first so the
+            // bookkeeping never points at a hotkey the pool no longer stakes to.
+            if self.staked_tao > 0 && root_hotkey != self.root_hotkey {
+                self.ensure_idle()?;
+                let booked = self.staked_tao;
+                let received = self.top_up_free(booked)?;
+                if received < booked {
+                    self.set_idle();
+                    return Err(Error::LiquidityInsufficient);
+                }
+                self.set_idle();
+            }
+
+            self.root_hotkey = root_hotkey;
+            self.staking_enabled = staking_enabled;
+            self.stake_buffer = stake_buffer;
+            self.sweep_threshold = sweep_threshold;
+            self.stake_floor = stake_floor;
+
+            self.env().emit_event(RootStakeConfigUpdated {
+                root_hotkey,
+                staking_enabled,
+                stake_buffer,
+                sweep_threshold,
+                stake_floor,
+            });
+            Ok(())
+        }
+
+        /// Permissionless keeper message: stakes excess free TAO into the root
+        /// subnet (netuid 0). No-op when staking is disabled, the pool is paused,
+        /// the excess is below `stake_floor`, or a sweep already ran this block.
+        #[ink(message)]
+        pub fn sweep(&mut self) -> Result<()> {
+            self.ensure_not_paused()?;
+            self.ensure_idle()?;
+            let result = self.sweep_to_root();
+            self.set_idle();
+            result
+        }
+
+        /// Sweeps excess free TAO above `stake_buffer + sweep_threshold` into the
+        /// root subnet (netuid 0). Returns `Ok(())` without doing anything when
+        /// staking is disabled, the pool is paused, a sweep already ran this block,
+        /// or the excess is below `stake_floor`. Callers may treat this as
+        /// best-effort: a failure never corrupts pool state, and the booked amount
+        /// is measured from the balance delta so silent runtime clipping cannot
+        /// drift the accounting.
+        pub(crate) fn sweep_to_root(&mut self) -> Result<()> {
+            if !self.staking_enabled || self.paused {
+                return Ok(());
+            }
+            let block = self.env().block_number();
+            if self.last_sweep_block == Some(block) {
+                return Ok(()); // rate limit: 1 sweep per block
+            }
+            let buffered = self.stake_buffer.saturating_add(self.sweep_threshold);
+            let excess = self.env().balance().saturating_sub(buffered);
+            if excess < self.stake_floor {
+                return Ok(());
+            }
+            // CEI: rate-limit stamp and external call before booking the stake.
+            self.last_sweep_block = Some(block);
+            self.env()
+                .extension()
+                .add_stake(self.root_hotkey, 0, excess)
+                .map_err(|_| Error::ChainExtensionFailed)?;
+            // Root is a stable 1:1 subnet with zero fees and zero slippage, so the
+            // booked amount equals the requested amount. The sweep only ever stakes
+            // TAO above `stake_buffer` (>= `stake_floor` >= the existential
+            // deposit), so silent ED clipping cannot bite either.
+            self.staked_tao = self.staked_tao.checked_add(excess).ok_or(Error::ArithmeticError)?;
+            self.env().emit_event(StakedIdleTao { amount: excess });
+            Ok(())
+        }
+
+        /// Unstakes up to `shortfall` TAO from the root subnet into the free
+        /// balance and returns the amount actually received (measured by balance
+        /// delta). A partial exit that would leave a remainder below `stake_floor`
+        /// instead exits the position fully. Maps any chain-extension failure to
+        /// `Error::LiquidityInsufficient` so callers treat root stake as ordinary
+        /// liquidity with a clean revert path.
+        pub(crate) fn top_up_free(&mut self, shortfall: Balance) -> Result<Balance> {
+            if shortfall == 0 || self.staked_tao == 0 {
+                return Ok(0);
+            }
+            let availability = self
+                .env()
+                .extension()
+                .get_stake_availability(self.env().account_id(), 0)
+                .map_err(|_| Error::LiquidityInsufficient)?;
+            let mut take = shortfall.min(availability.available).min(self.staked_tao);
+            if take == 0 {
+                return Ok(0);
+            }
+            // Dust rule: never leave a remainder below the staking floor; exit fully.
+            let remainder = self.staked_tao.saturating_sub(take);
+            if remainder > 0 && remainder < self.stake_floor {
+                take = self.staked_tao;
+            }
+            self.env()
+                .extension()
+                .remove_stake(self.root_hotkey, 0, take)
+                .map_err(|_| Error::LiquidityInsufficient)?;
+            // Root is a stable 1:1 subnet with zero fees and zero slippage, so the
+            // TAO received equals the alpha unstaked.
+            self.staked_tao = self.staked_tao.saturating_sub(take);
+            if take > 0 {
+                self.env().emit_event(UnstakedIdleTao { amount: take });
+            }
+            Ok(take)
         }
 
         // ─────────────────────────────────────────────────────────────
@@ -2568,6 +2849,24 @@ mod lending_pool {
                 return Some(Ratio::from_inner(0));
             }
             Ratio::from_integer(state.total_debt.into()).checked_div_int(total.into())
+        }
+
+        /// Returns the booked TAO currently staked on the root subnet (netuid 0).
+        #[ink(message)]
+        pub fn get_tao_staked(&self) -> Balance {
+            self.staked_tao
+        }
+
+        /// Returns the current idle-TAO root-subnet staking configuration.
+        #[ink(message)]
+        pub fn get_root_stake_config(&self) -> RootStakeConfig {
+            RootStakeConfig {
+                root_hotkey: self.root_hotkey,
+                staking_enabled: self.staking_enabled,
+                stake_buffer: self.stake_buffer,
+                sweep_threshold: self.sweep_threshold,
+                stake_floor: self.stake_floor,
+            }
         }
 
         /// Returns the current annual borrow rate (1e18) for a market, or `None`.
@@ -2932,12 +3231,25 @@ mod lending_pool {
                 positions: Mapping::default(),
                 position_keys: StorageVec::new(),
                 debt_principal: Mapping::default(),
+                root_hotkey: accounts.bob,
+                staked_tao: 0,
+                stake_buffer: DEFAULT_STAKE_BUFFER,
+                sweep_threshold: 0,
+                stake_floor: MIN_ROOT_STAKE_FLOOR,
+                last_sweep_block: None,
+                staking_enabled: false,
             }
         }
 
         /// Test-only: directly set a position in the mapping.
         pub(crate) fn debug_set_position(&mut self, market_id: u8, user: AccountId, pos: Position) {
             self.positions.insert((market_id, user), &pos);
+        }
+
+        /// Test-only: seed the root-staking bookkeeping (`staked_tao`) directly,
+        /// bypassing a real sweep.
+        pub(crate) fn debug_set_root_stake(&mut self, staked_tao: Balance) {
+            self.staked_tao = staked_tao;
         }
 
         /// Test-only: directly set the tracked debt principal for a position.

@@ -5,8 +5,9 @@ use super::lending_pool::*;
 use ink::env::test;
 use tusdt_primitives::Ratio;
 use tusdt_test_support::{
-    register_mock, register_mock_chain_fails, register_mock_no_stake,
-    register_mock_transfer_fails, set_caller,
+    last_ext_call, register_extension, register_mock, register_mock_chain_fails,
+    register_mock_no_stake, register_mock_stateful_root, register_mock_transfer_fails,
+    set_callee_balance, set_caller, MockExtension,
 };
 
 // ---------------------------------------------------------------------------
@@ -1712,4 +1713,222 @@ fn accrual_produces_interest_after_an_hour() {
         now_debt > principal,
         "interest should accrue: debt={now_debt} principal={principal}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Idle TAO root-subnet staking
+// ---------------------------------------------------------------------------
+
+/// Seeds `amount` native TAO into the pool contract's off-chain balance.
+/// `CustomEnvironment` uses `Balance = u64`, which the standard test balance
+/// setters do not support — route through the `DefaultEnvironment` host type,
+/// which shares the same keyed balance storage (see `tusdt_test_support`).
+fn seed_pool_balance(amount: u64) {
+    set_callee_balance(ink::env::account_id::<tusdt_env::CustomEnvironment>(), amount);
+}
+
+#[ink::test]
+fn root_stake_config_access_control_and_getter() {
+    let (mut pool, accounts) = setup();
+
+    // Non-governance cannot configure root staking.
+    set_caller(accounts.bob);
+    assert_eq!(
+        pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000),
+        Err(Error::NotGovernance)
+    );
+
+    // Governance can, and the config round-trips through the getter.
+    set_caller(accounts.alice);
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 500_000_000, 2_000_000)
+        .unwrap();
+    let cfg = pool.get_root_stake_config();
+    assert_eq!(cfg.root_hotkey, accounts.bob);
+    assert!(cfg.staking_enabled);
+    assert_eq!(cfg.stake_buffer, 1_000_000_000);
+    assert_eq!(cfg.sweep_threshold, 500_000_000);
+    assert_eq!(cfg.stake_floor, 2_000_000);
+}
+
+#[ink::test]
+fn root_stake_config_enforces_invariants() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+
+    // Floor below the pallet minimum is rejected.
+    assert_eq!(
+        pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 1_999_999),
+        Err(Error::InvalidParam)
+    );
+    // Buffer below the floor is rejected.
+    assert_eq!(
+        pool.set_root_stake_config(accounts.bob, true, 1_999_999, 0, 2_000_000),
+        Err(Error::InvalidParam)
+    );
+}
+
+#[ink::test]
+fn sweep_stakes_excess_above_buffer() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    register_mock_stateful_root(0);
+    seed_pool_balance(5_000_000_000);
+
+    // Permissionless keeper sweep.
+    set_caller(accounts.charlie);
+    pool.sweep().unwrap();
+
+    // 4 TAO staked (excess above the 1 TAO buffer).
+    assert_eq!(pool.get_tao_staked(), 4_000_000_000);
+    let record = last_ext_call().unwrap();
+    assert_eq!(record.func_id, 1);
+    assert_eq!(record.hotkey, accounts.bob);
+    assert_eq!(record.netuid, 0);
+    assert_eq!(record.amount, 4_000_000_000);
+}
+
+#[ink::test]
+fn sweep_rate_limited_to_one_per_block() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    register_mock_stateful_root(0);
+    seed_pool_balance(3_000_000_000);
+    pool.sweep_to_root().unwrap();
+    assert_eq!(pool.get_tao_staked(), 2_000_000_000);
+
+    // Same block: fresh excess would be sweepable, but the rate limit blocks it.
+    seed_pool_balance(3_000_000_000);
+    pool.sweep_to_root().unwrap();
+    assert_eq!(pool.get_tao_staked(), 2_000_000_000);
+
+    // Next block: the sweep runs again.
+    ink::env::test::set_block_number::<tusdt_env::CustomEnvironment>(1);
+    pool.sweep_to_root().unwrap();
+    assert_eq!(pool.get_tao_staked(), 4_000_000_000);
+}
+
+#[ink::test]
+fn sweep_noop_when_disabled_or_below_floor() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+
+    // Disabled (default): excess is ignored.
+    pool.set_root_stake_config(accounts.bob, false, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    register_mock_stateful_root(0);
+    seed_pool_balance(5_000_000_000);
+    pool.sweep().unwrap();
+    assert_eq!(pool.get_tao_staked(), 0);
+
+    // Enabled but excess below the floor: still a no-op.
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    seed_pool_balance(1_000_001_000); // excess 1_000 < floor 2_000_000
+    pool.sweep().unwrap();
+    assert_eq!(pool.get_tao_staked(), 0);
+}
+
+#[ink::test]
+fn top_up_free_unstakes_shortfall() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    register_mock_stateful_root(3_000_000_000);
+    pool.debug_set_root_stake(3_000_000_000);
+
+    let received = pool.top_up_free(1_000_000_000).unwrap();
+    assert_eq!(received, 1_000_000_000);
+    assert_eq!(pool.get_tao_staked(), 2_000_000_000);
+    let record = last_ext_call().unwrap();
+    assert_eq!(record.func_id, 2);
+    assert_eq!(record.hotkey, accounts.bob);
+    assert_eq!(record.netuid, 0);
+    assert_eq!(record.amount, 1_000_000_000);
+}
+
+#[ink::test]
+fn top_up_free_dust_rule_full_exit() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    register_mock_stateful_root(2_500_000);
+    pool.debug_set_root_stake(2_500_000);
+
+    // Taking 1_000_000 would leave 1_500_000 < floor → full exit instead.
+    let received = pool.top_up_free(1_000_000).unwrap();
+    assert_eq!(received, 2_500_000);
+    assert_eq!(pool.get_tao_staked(), 0);
+    assert_eq!(last_ext_call().unwrap().amount, 2_500_000);
+}
+
+#[ink::test]
+fn top_up_free_failure_maps_to_liquidity_insufficient() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    register_extension(
+        MockExtension::dispatch(None)
+            .with_stateful_root_stake(3_000_000_000)
+            .with_remove_stake_fails(true),
+    );
+    pool.debug_set_root_stake(3_000_000_000);
+    seed_pool_balance(0);
+
+    assert_eq!(pool.top_up_free(1_000_000_000), Err(Error::LiquidityInsufficient));
+    assert_eq!(pool.get_tao_staked(), 3_000_000_000);
+}
+
+#[ink::test]
+fn market_cash_includes_staked_tao() {
+    let (mut pool, _accounts) = setup();
+    pool.debug_set_root_stake(1_000_000_000);
+    seed_pool_balance(500_000_000);
+    assert_eq!(pool.market_cash(0).unwrap(), 1_500_000_000);
+}
+
+#[ink::test]
+fn hotkey_rotation_unstakes_before_swap() {
+    let (mut pool, accounts) = setup();
+    set_caller(accounts.alice);
+    pool.set_root_stake_config(accounts.bob, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    register_mock_stateful_root(3_000_000_000);
+    pool.debug_set_root_stake(3_000_000_000);
+
+    // Rotating the hotkey with stake outstanding fully unstakes first.
+    pool.set_root_stake_config(accounts.charlie, true, 1_000_000_000, 0, 2_000_000)
+        .unwrap();
+    assert_eq!(pool.get_tao_staked(), 0);
+    assert_eq!(pool.get_root_stake_config().root_hotkey, accounts.charlie);
+    let record = last_ext_call().unwrap();
+    assert_eq!(record.func_id, 2);
+    assert_eq!(record.hotkey, accounts.bob);
+    assert_eq!(record.amount, 3_000_000_000);
+}
+
+#[ink::test]
+fn treasury_sweep_respects_stake_buffer() {
+    let (pool, accounts) = setup();
+    set_caller(accounts.alice);
+
+    // 5 TAO − 1 TAO buffer − 1 ED guard = 3_999_999_999 sweepable.
+    seed_pool_balance(5_000_000_000);
+    assert_eq!(pool.treasury_sweepable(), Some(3_999_999_999));
+
+    // Exactly buffer + ED guard + 1: the last unit is the guard.
+    seed_pool_balance(1_000_000_002);
+    assert_eq!(pool.treasury_sweepable(), Some(1));
+
+    // At or below buffer + guard: nothing to sweep.
+    seed_pool_balance(1_000_000_001);
+    assert_eq!(pool.treasury_sweepable(), None);
+    seed_pool_balance(500_000_000);
+    assert_eq!(pool.treasury_sweepable(), None);
 }

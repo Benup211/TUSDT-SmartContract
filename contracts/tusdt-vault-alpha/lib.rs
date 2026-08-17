@@ -20,7 +20,7 @@ mod vault {
     const PAGE_SIZE: u32 = 10;
     /// Standard timelock (24 hours) that scheduled contract and global parameter updates
     /// must wait before they can be executed.
-    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 24 * 60 * 60 * 1_000;
+    pub(crate) const CONTRACT_PARAMS_TIMELOCK_MS: u64 = 60 * 1_000;
 
     mod params {
         include!("params.rs");

@@ -99,6 +99,9 @@ flowchart TB
    debt, as long as your global **health factor stays ≥ 1.0**.
 4. Interest is charged hourly at a utilization-based rate; repay any time, and repayments
    retire principal first.
+5. Idle TAO is staked to the root subnet (1:1 TAO↔alpha) to earn yield; withdrawals and TAO
+   borrows are topped up from that stake, and root dividends can later be harvested to the
+   treasury.
 
 ### Story 3 — Who steers it all
 

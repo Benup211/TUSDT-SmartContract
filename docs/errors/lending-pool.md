@@ -12,6 +12,8 @@ Fieldless `Error` enum: each variant encodes as a single `u8` SCALE index. See [
 
 **Reserved variants** (declared, not returned by any current message): `RepayAmountTooHigh`, `NoAlphaStakeFound`, `OracleCallFailed`, `InvalidCollateralNetuid`, `CloseFactorExceeded`, `PositionNotFound`.
 
+Idle-TAO root-subnet staking (`set_root_stake_config`, `sweep`) adds **no new variants** — it reuses `NotGovernance`, `InvalidParam`, `LiquidityInsufficient`, `ChainExtensionFailed` (plus the existing pause/reentrancy guards).
+
 ## Variants
 
 ### `NotGovernance`
@@ -20,7 +22,7 @@ Fieldless `Error` enum: each variant encodes as a single `u8` SCALE index. See [
 
 **Group:** Access
 
-**Returned by:** `cancel_global_params_update` (message), `maintainer` (message), `update_governance` (message), `ensure_governance` (helper), `update_position_key` (helper)
+**Returned by:** `cancel_global_params_update` (message), `maintainer` (message), `set_root_stake_config` (message), `update_governance` (message), `ensure_governance` (helper), `update_position_key` (helper)
 
 **Client guidance:** Authorization: only governance may call.
 
@@ -80,7 +82,7 @@ Fieldless `Error` enum: each variant encodes as a single `u8` SCALE index. See [
 
 **Group:** Amounts & liquidity
 
-**Returned by:** `borrow_tao` (message), `borrow_tusdt` (message), `withdraw_tao` (message), `withdraw_tusdt` (message)
+**Returned by:** `borrow_tao` (message), `borrow_tusdt` (message), `set_root_stake_config` (message), `withdraw_tao` (message), `withdraw_tusdt` (message), `top_up_free` (helper)
 
 **Client guidance:** State error: not enough liquidity in the market - lower the amount or wait for suppliers.
 
@@ -200,7 +202,7 @@ Fieldless `Error` enum: each variant encodes as a single `u8` SCALE index. See [
 
 **Group:** Alpha collateral
 
-**Returned by:** `claim_alpha_yield` (message), `liquidate` (message), `update_pool_hotkey` (message), `withdraw_alpha` (message), `collateral_price` (helper), `get_oracle_price` (helper)
+**Returned by:** `claim_alpha_yield` (message), `liquidate` (message), `sweep` (message), `update_pool_hotkey` (message), `withdraw_alpha` (message), `collateral_price` (helper), `get_oracle_price` (helper), `sweep_to_root` (helper)
 
 **Client guidance:** Node-level failure: retry (may be transient); report if persistent.
 
@@ -330,7 +332,7 @@ Fieldless `Error` enum: each variant encodes as a single `u8` SCALE index. See [
 
 **Group:** Params / timelock
 
-**Returned by:** `cancel_alpha_params_update` (message), `cancel_market_params_update` (message), `is_liquidatable` (message), `set_global_params` (message), `set_market_params` (message), `alpha_params_from_config` (helper), `global_params_from_config` (helper), `interest_params_from_config` (helper), `validate_alpha_params` (helper), `validate_interest_params` (helper)
+**Returned by:** `cancel_alpha_params_update` (message), `cancel_market_params_update` (message), `is_liquidatable` (message), `set_global_params` (message), `set_market_params` (message), `set_root_stake_config` (message), `alpha_params_from_config` (helper), `global_params_from_config` (helper), `interest_params_from_config` (helper), `validate_alpha_params` (helper), `validate_interest_params` (helper)
 
 **Client guidance:** Input error: a parameter failed validation - fix it and resubmit.
 
