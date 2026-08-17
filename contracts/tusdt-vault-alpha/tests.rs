@@ -575,16 +575,16 @@ fn execute_global_params_before_timelock_fails() {
 }
 
 #[ink::test]
-fn execute_global_params_at_60s_still_timelocked() {
-    // Regression pin: the timelock is 24 h — advancing one minute (the
-    // pre-24h timelock duration) must still be inside the window.
+fn execute_global_params_before_24h_still_timelocked() {
+    // Regression pin: the timelock is 24 h — advancing to just under 24 h
+    // must still be inside the window.
     let (mut vault, accounts) = setup();
     set_caller(accounts.alice);
     let mut config = default_global_config();
     config.transaction_fee = 50;
     vault.set_global_params(config).unwrap();
 
-    set_time(60 * 1_000);
+    set_time(24 * 60 * 60 * 1_000 - 1);
     assert_eq!(
         vault.execute_global_params_update(),
         Err(Error::ContractParamsUpdateTimelockActive)

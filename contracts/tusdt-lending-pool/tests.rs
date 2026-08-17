@@ -638,9 +638,9 @@ fn schedule_and_execute_global_params() {
 }
 
 #[ink::test]
-fn execute_global_params_at_60s_still_timelocked() {
-    // Regression pin: the timelock is 24 h — advancing 60 s (the old
-    // timelock duration) must still be inside the window.
+fn execute_global_params_before_24h_still_timelocked() {
+    // Regression pin: the timelock is 24 h — advancing to just under 24 h
+    // must still be inside the window.
     let (mut pool, accounts) = setup();
     set_caller(accounts.alice);
     let config = PoolGlobalParamsConfig {
@@ -654,7 +654,7 @@ fn execute_global_params_at_60s_still_timelocked() {
     };
     pool.set_global_params(config).unwrap();
 
-    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(60 * 1_000);
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(24 * 60 * 60 * 1_000 - 1);
     assert_eq!(
         pool.execute_global_params_update(),
         Err(Error::ParamsUpdateTimelockActive)

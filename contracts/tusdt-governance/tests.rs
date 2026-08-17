@@ -423,11 +423,11 @@ fn update_params_happy_path() {
     let mut p = GovernanceParams::default_params();
     p.quorum_bps = 3_000;
     p.approval_bps = 6_667;
-    p.voting_period_ms = 60 * 1_000;
+    p.voting_period_ms = 24 * 60 * 60 * 1_000;
     gov.update_params(p).expect("update ok");
     assert_eq!(gov.params().quorum_bps, 3_000);
     assert_eq!(gov.params().approval_bps, 6_667);
-    assert_eq!(gov.params().voting_period_ms, 60 * 1_000);
+    assert_eq!(gov.params().voting_period_ms, 24 * 60 * 60 * 1_000);
 }
 
 #[ink::test]
