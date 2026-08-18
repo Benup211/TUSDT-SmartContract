@@ -114,11 +114,18 @@ Per-user debt is stored as a fixed number that grows only when the user acts; th
 actual_debt = scaled_debt · borrow_index / 1e18
 ```
 
-Borrowing adds `scaled += amount / borrow_index`; repaying subtracts
-`scaled −= repay_amount / borrow_index`. Repayments clamp:
-`repay_amount = min(amount, actual_debt)` — you can never overpay (excess TAO is refunded; TUSDT
-overpayment is simply not pulled). A parallel `debt_principal` mapping tracks principal so
-`interest = debt − principal` is always readable (`get_user_debt_details`).
+Borrowing adds `scaled += ceil(amount / borrow_index)` and repaying subtracts
+`scaled −= ceil(repay_amount / borrow_index)` — both conversions round **up**
+(Aave's `rayDivUp` pattern), so a borrower's debt is never understated by a
+fractional rao and a partial repayment can never erase a position through
+rounding while a full repayment still clears it exactly. Repayments clamp:
+`repay_amount = min(amount, actual_debt, total_debt)` — you can never overpay
+(excess TAO is refunded; TUSDT overpayment is simply not pulled). A parallel
+`debt_principal` mapping tracks principal so `interest = debt − principal` is
+always readable (`get_user_debt_details`). The ceiling guarantees the market
+ledger stays exact: `total_debt` equals the sum of user debts and returns to
+exactly `0` when the last position is repaid — no ghost dust can survive to
+corrupt utilization or the APY displays.
 
 ### lTokens (Compound-style receipts)
 

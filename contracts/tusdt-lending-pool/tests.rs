@@ -1529,6 +1529,56 @@ fn borrow_scaling_divides_amount_by_borrow_index() {
 }
 
 #[ink::test]
+fn borrow_scaling_rounds_up_to_never_understate_debt() {
+    // Regression (production bug on testnet): floor-scaled borrows
+    // understated the position debt — borrowing 5 TUSDT at a grown borrow
+    // index reported 4.99999999 TUSDT, so the Max repay cleared the position
+    // while the market total kept dust (1 rao), and with zero cash the
+    // market then displayed 100% utilization / 80% supply APY / 100% borrow
+    // APY with no positions at all. Ceiling scaling (Aave rayDivUp)
+    // guarantees floor(scaled × index) >= borrowed amount.
+    let amount: u128 = 5_000_000_000; // 5 TUSDT
+    // Index observed on the live testnet pool's market 1 after the bug.
+    let index = Ratio::from_inner(1_000_316_946_018_546_683);
+
+    let scaled_floor = index
+        .checked_div_value(amount)
+        .expect("scaling must not overflow");
+    let scaled_ceil = index
+        .checked_div_value_ceil(amount)
+        .expect("ceil scaling must not overflow");
+    assert_eq!(scaled_floor, 4_998_415_772);
+    assert_eq!(scaled_ceil, 4_998_415_773, "ceil rounds the fractional unit up");
+
+    let debt_floor = index
+        .checked_mul_value(scaled_floor)
+        .expect("debt recompute must not overflow");
+    let debt_ceil = index
+        .checked_mul_value(scaled_ceil)
+        .expect("debt recompute must not overflow");
+    assert_eq!(debt_floor, 4_999_999_999, "floor scaling understates debt (the reported bug)");
+    assert_eq!(debt_ceil, 5_000_000_000, "ceil scaling reports the borrowed amount exactly");
+
+    // A partial repay one rao short of the reported debt must leave exactly
+    // one rao of debt in the position — never clear it, never lose dust.
+    let partial = debt_ceil - 1;
+    let scaled_repaid = index
+        .checked_div_value_ceil(partial)
+        .expect("repay scaling must not overflow");
+    assert_eq!(scaled_repaid, scaled_ceil - 1, "partial repay keeps 1 scaled unit");
+    let remaining_debt = index
+        .checked_mul_value(scaled_ceil - scaled_repaid)
+        .expect("remaining debt recompute must not overflow");
+    assert_eq!(remaining_debt, 1, "exactly 1 rao remains — no dusting off");
+
+    // Repaying the reported debt (Max) clears the scaled position exactly.
+    let full_repaid = index
+        .checked_div_value_ceil(debt_ceil)
+        .expect("full repay scaling must not overflow");
+    assert_eq!(full_repaid, scaled_ceil, "max repay clears the position exactly");
+}
+
+#[ink::test]
 fn repay_clamps_to_market_total_debt_when_ledger_drifted() {
     // Regression: with total_debt below the user's position debt (ledger drift
     // from the historical reversed-division bug), repaying the user's full debt
@@ -1567,38 +1617,55 @@ fn repay_clamps_to_market_total_debt_when_ledger_drifted() {
 }
 
 #[ink::test]
-fn repay_below_index_precision_is_rejected() {
-    // Regression: repaying less than one borrow-index unit cleared zero scaled
-    // debt while still decrementing total_debt — the repaid amount leaked from
-    // the market total without reducing the position's debt (the "small amount
-    // repay" bug).
-    let (mut pool, accounts) = setup();
-    set_caller(accounts.alice);
-
+fn sub_index_repay_credits_one_scaled_unit_instead_of_being_rejected() {
+    // Regression: repaying less than one borrow-index unit used to floor to
+    // zero scaled debt — the repaid amount leaked from the market total
+    // without crediting the position, and a later revision rejected it as
+    // ZeroAmount. Ceiling scaling (Aave rayDivUp) credits every positive
+    // repayment with at least one scaled unit, so neither the leak nor the
+    // rejection can happen. (The message-level path cannot run in the
+    // off-chain env — the ERC20 pull panics — so the guarantee is pinned at
+    // the conversion level, the same helper repay_tusdt uses.)
     let index = Ratio::from_inner(1_000_160_150_930_897_932); // ~1.00016
-    pool.debug_set_market_state(
-        1,
-        MarketState {
-            total_supplied: 129_000_000_000,
-            total_debt: 4,
-            borrow_index: index,
-            exchange_rate: Ratio::one(),
-            reserve_accrued: 0,
-            last_update: 0,
-        },
-    );
-    pool.debug_set_position(
-        1,
-        accounts.alice,
-        Position { ltoken_balance: 0, scaled_debt: 12, alpha_principal: 0 },
-    );
-    pool.debug_set_debt_principal(1, accounts.alice, 12);
+    let one_rao = index
+        .checked_div_value_ceil(1)
+        .expect("ceil scaling must not overflow");
+    assert_eq!(one_rao, 1, "1 rao credits exactly one scaled unit — no rejection, no leak");
+    // The credited scaled unit maps back to at least the repaid amount:
+    // the position's debt can never fall by less than what was repaid.
+    let debt_credit = index
+        .checked_mul_value(one_rao)
+        .expect("debt recompute must not overflow");
+    assert!(debt_credit >= 1, "debt credit {debt_credit} understates the 1-rao repay");
+}
 
-    // 1 raw unit at index ~1.00016 floors to 0 scaled units.
-    assert_eq!(pool.repay_tusdt(1), Err(Error::ZeroAmount));
+#[ink::test]
+fn utilization_and_rates_are_zero_when_market_has_no_debt() {
+    // Regression (production bug): after the dust repay cleared the last
+    // position but left 1 rao of ghost total_debt with zero cash, the market
+    // reported 100% utilization, 100% borrow APY and 80% supply APY with no
+    // debt at all. With an exact ledger the no-debt state must read zero.
+    // Market 0 is used because market_cash(1) needs a cross-contract ERC20
+    // call the off-chain env cannot serve.
+    let (pool, _accounts) = setup();
 
-    // The market total must not have been touched.
-    assert_eq!(pool.get_market_state(1).unwrap().total_debt, 4);
+    // Fresh market 0: total_debt == 0 and zero test-env cash.
+    assert_eq!(pool.get_utilization(0), Some(Ratio::from_inner(0)));
+    // Borrow rate falls back to the curve's base rate (0 for TAO defaults).
+    assert_eq!(
+        pool.get_borrow_rate(0),
+        Some(default_tao_interest_params().base_rate)
+    );
+    assert_eq!(pool.get_supply_rate(0), Some(Ratio::from_inner(0)));
+    // The pure rate curve pins the same behaviour for the TUSDT curve
+    // (base 0): at zero utilization both APYs are zero.
+    assert_eq!(
+        TusdtLendingPool::compute_borrow_rate(
+            &default_tusdt_interest_params(),
+            Ratio::from_inner(0)
+        ),
+        Ok(default_tusdt_interest_params().base_rate)
+    );
 }
 
 #[ink::test]

@@ -125,6 +125,23 @@ impl Ratio {
         value_fixed.checked_div(&self.as_fixed())?.checked_mul_int(1_u128)
     }
 
+    /// Divides a `u128` value by this `Ratio` (`value / self`), rounding UP to
+    /// the nearest integer — the Aave `rayDivUp` counterpart of
+    /// `checked_div_value`, used for scaled-debt conversions in the lending
+    /// pool. Ceiling division keeps a borrower's debt at least as large as the
+    /// amount they received (so borrow/repay bookkeeping can never understate
+    /// a position by dust) and guarantees a partial repayment never erases a
+    /// position through rounding while a full repayment still clears it
+    /// exactly. Returns `None` on overflow or when `self` is zero.
+    pub fn checked_div_value_ceil(self, value: u128) -> Option<u128> {
+        if self.0 == 0 {
+            return None;
+        }
+        let numerator = value.checked_mul(FIXED_SCALE)?;
+        let rounded = numerator.checked_add(self.0.checked_sub(1)?)?;
+        rounded.checked_div(self.0)
+    }
+
     /// Divides this `Ratio` by a `u128` integer (`self / rhs`). Returns `None` on overflow.
     pub fn checked_div_int(self, rhs: u128) -> Option<Self> {
         let rhs_fixed = FixedU128::checked_from_integer(rhs)?;

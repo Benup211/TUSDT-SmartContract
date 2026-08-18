@@ -1358,11 +1358,15 @@ mod lending_pool {
 
             // Effects
             let state = self.markets.get(0).ok_or(Error::MarketNotFound)?;
-            // scaled = amount / borrow_index — checked_div_value(value) computes
-            // value / self, so the Ratio must be the borrow_index (divisor).
+            // scaled = ceil(amount / borrow_index). Rounding UP (Aave rayDivUp)
+            // keeps the borrower's debt >= the amount they receive, so the
+            // market total can never drift above the sum of user positions
+            // (no ghost debt) and a later full repayment clears the position
+            // exactly. checked_div_value_ceil(value) computes value / self
+            // rounded up, so the Ratio must be the borrow_index (divisor).
             let scaled = state
                 .borrow_index
-                .checked_div_value(amount.into())
+                .checked_div_value_ceil(amount.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -1434,11 +1438,15 @@ mod lending_pool {
 
             // Effects
             let state = self.markets.get(1).ok_or(Error::MarketNotFound)?;
-            // scaled = amount / borrow_index — checked_div_value(value) computes
-            // value / self, so the Ratio must be the borrow_index (divisor).
+            // scaled = ceil(amount / borrow_index). Rounding UP (Aave rayDivUp)
+            // keeps the borrower's debt >= the amount they receive, so the
+            // market total can never drift above the sum of user positions
+            // (no ghost debt) and a later full repayment clears the position
+            // exactly. checked_div_value_ceil(value) computes value / self
+            // rounded up, so the Ratio must be the borrow_index (divisor).
             let scaled = state
                 .borrow_index
-                .checked_div_value(amount.into())
+                .checked_div_value_ceil(amount.into())
                 .and_then(|v| Balance::try_from(v).ok())
                 .ok_or(Error::ArithmeticError)?;
 
@@ -1513,18 +1521,23 @@ mod lending_pool {
                 return Ok(());
             }
 
-            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
-            // computes value / self, so the Ratio must be the borrow_index (divisor).
-            // A full repayment clears the position exactly, since floor division
-            // would otherwise strand the last sub-index unit of debt forever.
+            // scaled_repaid = repay_amount / borrow_index, rounded UP (Aave
+            // rayDivUp). A full repayment clears the position exactly, since
+            // floor division would otherwise strand the last sub-index unit of
+            // debt forever; a partial repayment must never erase the position
+            // through rounding. Clamped to the position so a drifted ledger
+            // can never underflow the subtraction.
             let scaled_repaid = if repay_amount >= debt {
                 pos.scaled_debt
             } else {
-                state
-                    .borrow_index
-                    .checked_div_value(repay_amount.into())
-                    .and_then(|v| Balance::try_from(v).ok())
-                    .ok_or(Error::ArithmeticError)?
+                min(
+                    state
+                        .borrow_index
+                        .checked_div_value_ceil(repay_amount.into())
+                        .and_then(|v| Balance::try_from(v).ok())
+                        .ok_or(Error::ArithmeticError)?,
+                    pos.scaled_debt,
+                )
             };
             // A partial repayment below one borrow-index unit computes zero
             // scaled units: it would decrement total_debt while the position's
@@ -1617,18 +1630,23 @@ mod lending_pool {
                 return Ok(());
             }
 
-            // scaled_repaid = repay_amount / borrow_index — checked_div_value(value)
-            // computes value / self, so the Ratio must be the borrow_index (divisor).
-            // A full repayment clears the position exactly, since floor division
-            // would otherwise strand the last sub-index unit of debt forever.
+            // scaled_repaid = repay_amount / borrow_index, rounded UP (Aave
+            // rayDivUp). A full repayment clears the position exactly, since
+            // floor division would otherwise strand the last sub-index unit of
+            // debt forever; a partial repayment must never erase the position
+            // through rounding. Clamped to the position so a drifted ledger
+            // can never underflow the subtraction.
             let scaled_repaid = if repay_amount >= debt {
                 pos.scaled_debt
             } else {
-                state
-                    .borrow_index
-                    .checked_div_value(repay_amount.into())
-                    .and_then(|v| Balance::try_from(v).ok())
-                    .ok_or(Error::ArithmeticError)?
+                min(
+                    state
+                        .borrow_index
+                        .checked_div_value_ceil(repay_amount.into())
+                        .and_then(|v| Balance::try_from(v).ok())
+                        .ok_or(Error::ArithmeticError)?,
+                    pos.scaled_debt,
+                )
             };
             // A partial repayment below one borrow-index unit computes zero
             // scaled units: it would decrement total_debt while the position's
@@ -2024,13 +2042,18 @@ mod lending_pool {
             // ── Effects (all before external calls) ──
 
             // 1. Reduce borrower debt
-            // scaled_repaid = actual_debt_units / borrow_index — checked_div_value(value)
-            // computes value / self, so the Ratio must be the borrow_index (divisor).
-            let scaled_repaid = state
-                .borrow_index
-                .checked_div_value(actual_debt_units.into())
-                .and_then(|v| Balance::try_from(v).ok())
-                .ok_or(Error::ArithmeticError)?;
+            // scaled_repaid = actual_debt_units / borrow_index, rounded UP
+            // (Aave rayDivUp): the borrower's scaled debt must fall by at
+            // least the covered amount so no dust survives in the position or
+            // drifts the market total. Clamped to the position.
+            let scaled_repaid = min(
+                state
+                    .borrow_index
+                    .checked_div_value_ceil(actual_debt_units.into())
+                    .and_then(|v| Balance::try_from(v).ok())
+                    .ok_or(Error::ArithmeticError)?,
+                pos.scaled_debt,
+            );
 
             let mut state = state;
             state.total_debt =

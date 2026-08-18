@@ -74,3 +74,39 @@ fn basis_points_round_trip() {
     assert_eq!(ratio.to_basis_points(), Some(1_500));
     assert_eq!(ratio.to_percentage(), Some(15));
 }
+
+#[test]
+fn div_value_ceil_rounds_up() {
+    // checked_div_value_ceil(self, value) = ceil(value / self) — the Aave
+    // rayDivUp counterpart used by the lending pool's scaled-debt
+    // conversions. Exact divisions are unchanged; fractional results round
+    // UP so borrowers can never be understated and partial repays can
+    // never erase a position by rounding.
+    let one = Ratio::one();
+    assert_eq!(one.checked_div_value_ceil(5_000_000_000).unwrap(), 5_000_000_000);
+
+    let two = Ratio::from_integer(2);
+    assert_eq!(two.checked_div_value_ceil(10).unwrap(), 5, "exact division stays exact");
+    assert_eq!(two.checked_div_value_ceil(11).unwrap(), 6, "ceil, not floor");
+
+    // Live-testnet index after the dust bug: ceil keeps the 5 TUSDT borrow
+    // at exactly 5 TUSDT while the floor variant understated it by 1 rao.
+    let index = Ratio::from_inner(1_000_316_946_018_546_683);
+    let floor = index.checked_div_value(5_000_000_000).unwrap();
+    let ceil = index.checked_div_value_ceil(5_000_000_000).unwrap();
+    assert_eq!(floor, 4_998_415_772);
+    assert_eq!(ceil, floor + 1);
+    // Round-trip: the ceil-scaled debt recomputed against the index must
+    // never fall below the borrowed amount.
+    let debt = index.checked_mul_value(ceil).unwrap();
+    assert_eq!(debt, 5_000_000_000);
+    let debt_floor = index.checked_mul_value(floor).unwrap();
+    assert_eq!(debt_floor, 4_999_999_999, "floor scaling understates the debt");
+}
+
+#[test]
+fn div_value_ceil_rejects_zero_divisor() {
+    let zero = Ratio::from_inner(0);
+    assert_eq!(zero.checked_div_value_ceil(10), None);
+    assert_eq!(zero.checked_div_value(10), None, "floor variant guards zero too");
+}
