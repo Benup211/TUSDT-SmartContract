@@ -66,6 +66,43 @@ mod lending_pool {
         TUSDT = 1,
     }
 
+    /// lTokens to mint for a supply of `amount` underlying at
+    /// `exchange_rate` (floored). Minting at a grown rate hands the depositor
+    /// at most their exact share of the pool, so late deposits can never
+    /// dilute earlier suppliers' accrued interest. Returns `None` on a zero
+    /// rate or overflow. `exchange_rate` is `>= 1e18` in practice.
+    pub(crate) fn compute_mint_amount(amount: Balance, exchange_rate: Ratio) -> Option<Balance> {
+        // checked_div_value(value) computes value / self — the divisor is the rate.
+        exchange_rate.checked_div_value(amount.into()).and_then(|v| Balance::try_from(v).ok())
+    }
+
+    /// Underlying redeemable for `ltoken_amount` at `exchange_rate`
+    /// (floored — the pool never pays out more than the lTokens are worth;
+    /// the sub-rao dust stays with the pool). Returns `None` on overflow.
+    pub(crate) fn compute_redeem_amount(
+        ltoken_amount: Balance,
+        exchange_rate: Ratio,
+    ) -> Option<Balance> {
+        // checked_mul_value(value) computes value * self.
+        exchange_rate
+            .checked_mul_value(ltoken_amount.into())
+            .and_then(|v| Balance::try_from(v).ok())
+    }
+
+    /// Resets the lToken exchange rate to 1.0 once the market has fully
+    /// drained (`total_supplied == 0`). The exchange rate only ever grows in
+    /// `accrue_interest`, so without this reset the next genesis supply (which
+    /// mints 1:1 at the empty-market branch) would be credited at the stale
+    /// grown rate — the new supplier's lTokens would claim more underlying
+    /// than they deposited, leaving the pool short. The borrow index is left
+    /// untouched: it is self-consistent for scaled debt, and resetting it
+    /// could corrupt drifted legacy positions.
+    pub(crate) fn reset_exchange_rate_when_drained(state: &mut MarketState) {
+        if state.total_supplied == 0 {
+            state.exchange_rate = Ratio::one();
+        }
+    }
+
     /// Per-market runtime accrual state. Markets 0 (TAO) and 1 (TUSDT) are supply+borrow
     /// markets with interest accrual. Markets 2+ are alpha collateral-only markets (one per
     /// approved subnet); their MarketState exists but accrual is a no-op.
@@ -73,7 +110,11 @@ mod lending_pool {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct MarketState {
-        /// Total underlying supplied (principal deposits only — not including accrued interest).
+        /// Total underlying supplied, tracked in lToken (scaled) units: the
+        /// face value owed to suppliers is `total_supplied × exchange_rate`,
+        /// and accrued interest grows it through the exchange rate alone.
+        /// Supply mints `amount / exchange_rate` lTokens and withdrawal burns
+        /// the lTokens themselves, so this always equals the lToken supply.
         pub total_supplied: Balance,
         /// Total outstanding debt in underlying units (includes accrued interest).
         pub total_debt: Balance,
@@ -957,11 +998,17 @@ mod lending_pool {
                 self.set_idle();
             })?;
 
-            // Cap check
+            // Cap check. `total_supplied` is tracked in lToken (scaled)
+            // units; project the face value at the current exchange rate so
+            // the cap keeps its face-amount semantics.
             if self.global_params.supply_cap_tao > 0 {
                 let state = self.markets.get(0).ok_or(Error::MarketNotFound)?;
-                let projected =
-                    state.total_supplied.checked_add(amount).ok_or(Error::ArithmeticError)?;
+                let face_supplied = state
+                    .exchange_rate
+                    .checked_mul_value(state.total_supplied.into())
+                    .and_then(|v| Balance::try_from(v).ok())
+                    .ok_or(Error::ArithmeticError)?;
+                let projected = face_supplied.checked_add(amount).ok_or(Error::ArithmeticError)?;
                 if projected > self.global_params.supply_cap_tao {
                     self.set_idle();
                     return Err(Error::SupplyCapExceeded);
@@ -972,16 +1019,16 @@ mod lending_pool {
             let ltoken_addr = self.ltoken_by_market.get(0).ok_or(Error::MarketNotFound)?;
             let mut ltoken = TusdtErc20Ref::from_account_id(ltoken_addr);
 
-            // Compute lToken amount: amount * ltoken_total_supply / total_supplied
+            // Compute lToken amount: amount / exchange_rate (1:1 at genesis).
+            // The exchange rate grows with accrued supply interest, so a
+            // deposit at a grown rate mints proportionally fewer lTokens and
+            // interest accrued before the deposit stays with earlier
+            // suppliers.
             let ltoken_supply = ltoken.total_supply();
             let ltoken_scaled = if ltoken_supply == 0 || state.total_supplied == 0 {
                 amount
             } else {
-                Ratio::from_integer(amount.into())
-                    .checked_mul_value(ltoken_supply.into())
-                    .and_then(|v| v.checked_div(state.total_supplied as u128))
-                    .and_then(|v| u64::try_from(v).ok())
-                    .unwrap_or(0)
+                compute_mint_amount(amount, state.exchange_rate).ok_or(Error::ArithmeticError)?
             };
             if ltoken_scaled == 0 {
                 self.set_idle();
@@ -991,8 +1038,14 @@ mod lending_pool {
             // Effects: update market state and position
             let caller = self.env().caller();
             let mut state = self.markets.get(0).ok_or(Error::MarketNotFound)?;
+            if state.total_supplied == 0 {
+                // Genesis supply on a fully drained market: restart the
+                // exchange rate at 1.0 so the 1:1 genesis mint is backed 1:1.
+                // A stale grown rate would over-credit the new supplier.
+                state.exchange_rate = Ratio::one();
+            }
             state.total_supplied =
-                state.total_supplied.checked_add(amount).ok_or(Error::ArithmeticError)?;
+                state.total_supplied.checked_add(ltoken_scaled).ok_or(Error::ArithmeticError)?;
             self.markets.insert(0, &state);
 
             let mut pos = self.positions.get((0, caller)).unwrap_or(Position {
@@ -1043,11 +1096,17 @@ mod lending_pool {
                 self.set_idle();
             })?;
 
-            // Cap check
+            // Cap check. `total_supplied` is tracked in lToken (scaled)
+            // units; project the face value at the current exchange rate so
+            // the cap keeps its face-amount semantics.
             if self.global_params.supply_cap_tusdt > 0 {
                 let state = self.markets.get(1).ok_or(Error::MarketNotFound)?;
-                let projected =
-                    state.total_supplied.checked_add(amount).ok_or(Error::ArithmeticError)?;
+                let face_supplied = state
+                    .exchange_rate
+                    .checked_mul_value(state.total_supplied.into())
+                    .and_then(|v| Balance::try_from(v).ok())
+                    .ok_or(Error::ArithmeticError)?;
+                let projected = face_supplied.checked_add(amount).ok_or(Error::ArithmeticError)?;
                 if projected > self.global_params.supply_cap_tusdt {
                     self.set_idle();
                     return Err(Error::SupplyCapExceeded);
@@ -1066,16 +1125,16 @@ mod lending_pool {
             let ltoken_addr = self.ltoken_by_market.get(1).ok_or(Error::MarketNotFound)?;
             let mut ltoken = TusdtErc20Ref::from_account_id(ltoken_addr);
 
-            // Compute lToken amount
+            // Compute lToken amount: amount / exchange_rate (1:1 at genesis).
+            // The exchange rate grows with accrued supply interest, so a
+            // deposit at a grown rate mints proportionally fewer lTokens and
+            // interest accrued before the deposit stays with earlier
+            // suppliers.
             let ltoken_supply = ltoken.total_supply();
             let ltoken_scaled = if ltoken_supply == 0 || state.total_supplied == 0 {
                 amount
             } else {
-                Ratio::from_integer(amount.into())
-                    .checked_mul_value(ltoken_supply.into())
-                    .and_then(|v| v.checked_div(state.total_supplied as u128))
-                    .and_then(|v| u64::try_from(v).ok())
-                    .unwrap_or(0)
+                compute_mint_amount(amount, state.exchange_rate).ok_or(Error::ArithmeticError)?
             };
             if ltoken_scaled == 0 {
                 self.set_idle();
@@ -1084,8 +1143,14 @@ mod lending_pool {
 
             // Effects
             let mut state = self.markets.get(1).ok_or(Error::MarketNotFound)?;
+            if state.total_supplied == 0 {
+                // Genesis supply on a fully drained market: restart the
+                // exchange rate at 1.0 so the 1:1 genesis mint is backed 1:1.
+                // A stale grown rate would over-credit the new supplier.
+                state.exchange_rate = Ratio::one();
+            }
             state.total_supplied =
-                state.total_supplied.checked_add(amount).ok_or(Error::ArithmeticError)?;
+                state.total_supplied.checked_add(ltoken_scaled).ok_or(Error::ArithmeticError)?;
             self.markets.insert(1, &state);
 
             let mut pos = self.positions.get((1, caller)).unwrap_or(Position {
@@ -1142,16 +1207,15 @@ mod lending_pool {
                 return Err(Error::InsufficientLTokenBalance);
             }
 
-            // Compute underlying amount
-            let ltoken_supply = ltoken.total_supply();
-            let underlying = if ltoken_supply == 0 || state.total_supplied == 0 {
+            // Compute underlying amount: ltoken_amount × exchange_rate. The
+            // exchange rate grew with accrued supply interest, so this
+            // includes the supplier's proportional share of borrower interest
+            // (net of the reserve slice) — not just the principal.
+            let underlying = if state.total_supplied == 0 {
                 0
             } else {
-                Ratio::from_integer(ltoken_amount.into())
-                    .checked_mul_value(state.total_supplied.into())
-                    .and_then(|v| v.checked_div(ltoken_supply as u128))
-                    .and_then(|v| u64::try_from(v).ok())
-                    .unwrap_or(0)
+                compute_redeem_amount(ltoken_amount, state.exchange_rate)
+                    .ok_or(Error::ArithmeticError)?
             };
             if underlying == 0 {
                 self.set_idle();
@@ -1185,7 +1249,8 @@ mod lending_pool {
 
             let mut state = self.markets.get(0).ok_or(Error::MarketNotFound)?;
             state.total_supplied =
-                state.total_supplied.checked_sub(underlying).ok_or(Error::ArithmeticError)?;
+                state.total_supplied.checked_sub(ltoken_amount).ok_or(Error::ArithmeticError)?;
+            reset_exchange_rate_when_drained(&mut state);
             self.markets.insert(0, &state);
 
             let mut pos = self.positions.get((0, caller)).unwrap_or(Position {
@@ -1240,15 +1305,15 @@ mod lending_pool {
                 return Err(Error::InsufficientLTokenBalance);
             }
 
-            let ltoken_supply = ltoken.total_supply();
-            let underlying = if ltoken_supply == 0 || state.total_supplied == 0 {
+            // Compute underlying amount: ltoken_amount × exchange_rate. The
+            // exchange rate grew with accrued supply interest, so this
+            // includes the supplier's proportional share of borrower interest
+            // (net of the reserve slice) — not just the principal.
+            let underlying = if state.total_supplied == 0 {
                 0
             } else {
-                Ratio::from_integer(ltoken_amount.into())
-                    .checked_mul_value(state.total_supplied.into())
-                    .and_then(|v| v.checked_div(ltoken_supply as u128))
-                    .and_then(|v| u64::try_from(v).ok())
-                    .unwrap_or(0)
+                compute_redeem_amount(ltoken_amount, state.exchange_rate)
+                    .ok_or(Error::ArithmeticError)?
             };
             if underlying == 0 {
                 self.set_idle();
@@ -1266,7 +1331,8 @@ mod lending_pool {
 
             let mut state = self.markets.get(1).ok_or(Error::MarketNotFound)?;
             state.total_supplied =
-                state.total_supplied.checked_sub(underlying).ok_or(Error::ArithmeticError)?;
+                state.total_supplied.checked_sub(ltoken_amount).ok_or(Error::ArithmeticError)?;
+            reset_exchange_rate_when_drained(&mut state);
             self.markets.insert(1, &state);
 
             let mut pos = self.positions.get((1, caller)).unwrap_or(Position {
@@ -1932,8 +1998,15 @@ mod lending_pool {
                 self.set_idle();
             })?;
 
-            // Accrue interest on the debt market
-            self.accrue_interest(debt_market).inspect_err(|_| {
+            // Accrue interest on BOTH debt markets: the health factor and the
+            // close-factor cap read the borrower's debt on both markets, so a
+            // stale borrow index on the non-liquidated market would understate
+            // the accrued interest and let the liquidation cover too little
+            // (principal + accrued interest must both be settled).
+            self.accrue_interest(0).inspect_err(|_| {
+                self.set_idle();
+            })?;
+            self.accrue_interest(1).inspect_err(|_| {
                 self.set_idle();
             })?;
 
@@ -2918,21 +2991,16 @@ mod lending_pool {
         }
 
         /// Returns the underlying amount a user's lToken balance is worth in a
-        /// market, or `None`.
+        /// market (principal plus their accrued share of borrower interest),
+        /// or `None` for alpha markets or an unknown user/market.
         #[ink(message)]
         pub fn get_underlying_balance(&self, market_id: u8, user: AccountId) -> Option<Balance> {
+            if market_id > 1 {
+                return None; // alpha markets have no lToken
+            }
             let pos = self.positions.get((market_id, user))?;
             let state = self.markets.get(market_id)?;
-            let ltoken_addr = self.ltoken_by_market.get(market_id)?;
-            let ltoken = TusdtErc20Ref::from_account_id(ltoken_addr);
-            let ltoken_supply = ltoken.total_supply();
-            if ltoken_supply == 0 || state.total_supplied == 0 {
-                return Some(0);
-            }
-            Ratio::from_integer(pos.ltoken_balance.into())
-                .checked_mul_value(state.total_supplied.into())
-                .and_then(|v| v.checked_div(ltoken_supply as u128))
-                .and_then(|v| u64::try_from(v).ok())
+            compute_redeem_amount(pos.ltoken_balance, state.exchange_rate)
         }
 
         /// Returns a user's current debt in a market in underlying units
