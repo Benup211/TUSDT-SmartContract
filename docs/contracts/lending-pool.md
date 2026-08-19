@@ -134,10 +134,23 @@ Each supply market has a child ERC-20 receipt token (lTAO, lTUSDT), spawned from
 rate — your token balance never changes, its worth does:
 
 ```
-supply:   ltoken_minted = amount · ltoken_total_supply / total_supplied   # 1:1 at genesis
-withdraw: underlying    = ltoken_burned  · total_supplied / ltoken_supply
+supply:   ltoken_minted = amount / exchange_rate            # 1:1 at genesis
+withdraw: underlying    = ltoken_burned · exchange_rate
 underlying = ltoken_balance · exchange_rate
 ```
+
+Borrower interest reaches suppliers through that exchange-rate growth: repaying `1.001` for a
+`1` borrow retires the debt, and the `0.001` interest (minus the reserve slice) raises the
+redemption value of every lToken. `total_supplied` is tracked in lToken (scaled) units — the
+face value owed to suppliers is `total_supplied · exchange_rate` — and supply/withdraw book it
+in lTokens minted/burned. Deposits at a grown rate mint proportionally fewer lTokens, so late
+suppliers can never claim interest accrued before their deposit.
+
+The exchange rate **never resets while any supply remains** — a full debt repayment (utilization
+→ 0) leaves it grown, preserving the accrued supplier value. Only when the market fully drains
+(`total_supplied == 0`, every lToken burned) does it reset to 1.0, so the next genesis supply
+mints 1:1 claims that are backed 1:1. The borrow index is never reset: it is self-consistent
+for scaled debt across cycles.
 
 Amounts that round to zero revert with `MintBelowPrecision`.
 

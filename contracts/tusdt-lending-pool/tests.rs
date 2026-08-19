@@ -822,6 +822,94 @@ fn exchange_rate_starts_at_one() {
 }
 
 #[ink::test]
+fn mint_amount_scales_by_exchange_rate() {
+    // Supplying underlying at a grown exchange rate mints proportionally
+    // fewer lTokens (floored), so a late depositor can never claim interest
+    // accrued before their deposit (anti-dilution).
+    let rate = Ratio::from_inner(1_100_000_000_000_000_000); // 1.1
+    assert_eq!(compute_mint_amount(100_000_000_000, rate), Some(90_909_090_909));
+    // At 1.0 (genesis) minting is 1:1.
+    assert_eq!(compute_mint_amount(100_000_000_000, Ratio::one()), Some(100_000_000_000));
+}
+
+#[ink::test]
+fn redeem_amount_includes_accrued_interest() {
+    // Regression: withdrawal redeemed principal only — the exchange rate grew
+    // but never entered the redeem math, so suppliers could never claim
+    // borrower interest. Redeem must be ltoken × exchange_rate: 100 lTokens
+    // at 1.1 redeem 110 TAO — principal plus the accrued share.
+    let rate = Ratio::from_inner(1_100_000_000_000_000_000); // 1.1
+    assert_eq!(compute_redeem_amount(100_000_000_000, rate), Some(110_000_000_000));
+    // At 1.0 (no interest accrued) it is exactly the principal.
+    assert_eq!(compute_redeem_amount(100_000_000_000, Ratio::one()), Some(100_000_000_000));
+}
+
+#[ink::test]
+fn underlying_balance_view_quotes_exchange_rate() {
+    // The view must quote a position's lTokens at the market exchange rate
+    // (scaled), not at the principal-only ratio it used before the fix.
+    let (mut pool, accounts) = setup();
+    pool.debug_set_market_state(
+        0,
+        MarketState {
+            total_supplied: 90_909_090_909,
+            total_debt: 0,
+            borrow_index: Ratio::one(),
+            exchange_rate: Ratio::from_inner(1_100_000_000_000_000_000),
+            reserve_accrued: 0,
+            last_update: 0,
+        },
+    );
+    pool.debug_set_position(
+        0,
+        accounts.alice,
+        Position { ltoken_balance: 100_000_000_000, scaled_debt: 0, alpha_principal: 0 },
+    );
+    assert_eq!(pool.get_underlying_balance(0, accounts.alice), Some(110_000_000_000));
+    // Alpha markets (id >= 2) have no lToken: the view stays None.
+    assert_eq!(pool.get_underlying_balance(2, accounts.alice), None);
+}
+
+#[ink::test]
+fn exchange_rate_resets_when_market_fully_drains() {
+    // After the last supplier withdraws (total_supplied == 0) the exchange
+    // rate must reset to 1.0 so the next genesis supply mints a 1:1 claim
+    // that is backed 1:1 — a stale grown rate would over-credit the new
+    // supplier (their lTokens would claim more than they deposited).
+    let mut state = MarketState {
+        total_supplied: 0,
+        total_debt: 0,
+        borrow_index: Ratio::from_inner(1_050_000_000_000_000_000),
+        exchange_rate: Ratio::from_inner(1_100_000_000_000_000_000),
+        reserve_accrued: 0,
+        last_update: 0,
+    };
+    reset_exchange_rate_when_drained(&mut state);
+    assert_eq!(state.exchange_rate, Ratio::one());
+    // The borrow index is deliberately left alone: it is self-consistent for
+    // scaled debt, and resetting it could corrupt drifted legacy positions.
+    assert_eq!(state.borrow_index, Ratio::from_inner(1_050_000_000_000_000_000));
+}
+
+#[ink::test]
+fn exchange_rate_survives_debt_repayment_while_supplied() {
+    // Utilization dropping to zero must NOT reset the exchange rate while any
+    // supply remains: the accrued supplier value lives in the grown rate, and
+    // resetting here would claw back supplier interest (the very bug the
+    // exchange-rate redemption fix exists to solve).
+    let mut state = MarketState {
+        total_supplied: 100_000_000_000,
+        total_debt: 0,
+        borrow_index: Ratio::one(),
+        exchange_rate: Ratio::from_inner(1_100_000_000_000_000_000),
+        reserve_accrued: 0,
+        last_update: 0,
+    };
+    reset_exchange_rate_when_drained(&mut state);
+    assert_eq!(state.exchange_rate, Ratio::from_inner(1_100_000_000_000_000_000));
+}
+
+#[ink::test]
 fn borrow_index_starts_at_one() {
     let (pool, _accounts) = setup();
     let idx = pool.get_borrow_index(0).unwrap();
