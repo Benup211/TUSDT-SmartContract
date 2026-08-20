@@ -28,6 +28,7 @@ tusdt-voting = { path = "../../voting", default-features = false }
 
 [dev-dependencies]
 ink_e2e = { workspace = true }
+tusdt-test-support = { path = "../../test-support" }
 
 [lib]
 path = "lib.rs"
@@ -48,3 +49,9 @@ std = [
 ]
 ink-as-dependency = []
 e2e-tests = []
+
+[lints.clippy]
+arithmetic-side-effects = "deny"
+unwrap-used = "deny"
+expect-used = "deny"
+indexing-slicing = "deny"

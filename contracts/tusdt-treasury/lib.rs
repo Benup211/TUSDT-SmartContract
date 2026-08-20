@@ -33,11 +33,17 @@ mod treasury {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub enum Fund {
+        /// Emergency fund — receives the 5,000 bps (50%) base share plus any distribution remainder.
         Emergency,
+        /// Operation fund — 3,000 bps (30%).
         Operation,
+        /// Insurance fund — 1,000 bps (10%).
         Insurance,
+        /// Dividend fund — 400 bps (4%).
         Dividend,
+        /// Buyback fund — 400 bps (4%).
         Buyback,
+        /// Voting fund — 200 bps (2%).
         Voting,
     }
 
@@ -46,7 +52,9 @@ mod treasury {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub enum TokenKind {
+        /// The TUSDT stablecoin (ERC20).
         Tusdt,
+        /// The chain's native token (TAO).
         Native,
     }
 
@@ -100,6 +108,7 @@ mod treasury {
         ArithmeticError,
     }
 
+    /// Result type for treasury operations, wrapping the contract-specific [`Error`] enum.
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtTreasury {

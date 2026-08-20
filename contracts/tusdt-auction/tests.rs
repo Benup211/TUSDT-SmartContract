@@ -1,12 +1,14 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use super::auction::*;
 use super::*;
 use tusdt_primitives::Ratio;
-
-fn set_caller(caller: ink::primitives::AccountId) {
-    let callee = ink::env::account_id::<tusdt_env::CustomEnvironment>();
-    ink::env::test::set_callee::<tusdt_env::CustomEnvironment>(callee);
-    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(caller);
-}
+use tusdt_test_support::set_caller;
 
 fn set_time(timestamp: u64) {
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(timestamp);

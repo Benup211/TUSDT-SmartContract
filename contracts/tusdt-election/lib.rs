@@ -40,6 +40,7 @@ mod election {
     // and reachability from the tests.
     pub(crate) use tusdt_voting::*;
 
+    /// Milliseconds in one day; base unit for the election cadence constants.
     pub(crate) const MS_PER_DAY: u64 = tusdt_voting::MS_PER_DAY;
     /// One term ≈ 2 years. The exact "5th of the month" alignment is preserved by recomputing the
     /// next-election anchor from `genesis_election_ts + term_index * TERM_LENGTH_MS` each cycle
@@ -75,14 +76,14 @@ mod election {
         Idle,
         /// Cycle is scheduled (electorate snapshot fetched from governance); candidates register.
         Registration,
-        /// Voting is open; opened lazily by the first vote and runs to [`VOTE_CLOSE_DAY`] (the 10th).
+        /// Voting is open; opened lazily by the first vote and runs to `VOTE_CLOSE_DAY` (the 10th).
         Voting,
         /// A winner is recorded; awaiting `activate` (on/after the 15th).
         Elected,
     }
 
     /// A registered candidacy for the current cycle. Eligibility is gated on-chain by the
-    /// registrant's alpha stake in `netuid` (see [`TusdtElection::register_candidate`]) — there is
+    /// registrant's alpha stake in `netuid` (see `TusdtElection::register_candidate`) — there is
     /// no separate approval step; a registered candidate is immediately votable.
     #[derive(Debug, Clone)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
@@ -129,7 +130,7 @@ mod election {
 
     /// An in-flight 6-month migration after a different-subnet winner activates. Until `ends_at`,
     /// governance's snapshot (the previous subnet) stays the electorate and the netuid switch is
-    /// deferred to [`TusdtElection::end_transition`].
+    /// deferred to `TusdtElection::end_transition`.
     #[derive(Debug, Clone)]
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -162,7 +163,7 @@ mod election {
         incumbent: AccountId,
         /// The current governing subnet (mirrors governance's netuid; updated at `end_transition`).
         active_netuid: u16,
-        /// Completed terms per account; an account at [`MAX_TERMS`] cannot register.
+        /// Completed terms per account; an account at `MAX_TERMS` cannot register.
         terms_served: Mapping<AccountId, u32>,
         /// Current election lifecycle phase.
         phase: Phase,
@@ -181,7 +182,7 @@ mod election {
         /// Denominator for the >50% test: summed voting power of unique participating leaves.
         total_voting_power: u128,
         /// Summed raw (snapshot-frozen) alpha balance of unique participating leaves; measured
-        /// against the [`QUORUM_BPS`] turnout quorum at `finalize`.
+        /// against the `QUORUM_BPS` turnout quorum at `finalize`.
         total_voted_balance: u128,
         /// Running leader, maintained on every vote so `finalize` need not scan candidates. Since
         /// each leaf votes once, candidate totals sum to `total_voting_power`, so at most one
@@ -207,7 +208,7 @@ mod election {
     // Events                                                                                       //
     // ------------------------------------------------------------------------------------------- //
 
-    /// Emitted when a new election cycle is opened by [`schedule_election`](TusdtElection::schedule_election).
+    /// Emitted when a new election cycle is opened by `schedule_election`(TusdtElection::schedule_election).
     #[ink(event)]
     pub struct ElectionScheduled {
         /// The new cycle's identifier (monotonically increasing).
@@ -323,7 +324,7 @@ mod election {
         CandidateNotFound,
         /// The caller is already a registered candidate for this cycle.
         AlreadyRegistered,
-        /// The candidate has already served the maximum number of terms ([`MAX_TERMS`]).
+        /// The candidate has already served the maximum number of terms (`MAX_TERMS`).
         TermLimitReached,
         /// The provided subnet netuid is invalid (e.g., zero).
         InvalidNetuid,
@@ -353,7 +354,7 @@ mod election {
         ArithmeticError,
     }
 
-    /// Result type for election operations, wrapping the contract-specific [`Error`] enum.
+    /// Result type for election operations, wrapping the contract-specific `Error` enum.
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtElection {
@@ -364,9 +365,9 @@ mod election {
         /// governance's snapshot at schedule). `initial_incumbent` is the seated maintainer at
         /// deployment and runs the election machinery (emergency, cancel) until the next winner
         /// activates. It is treated as having just been elected at genesis — counted as one served
-        /// term, with the first election one full [`TERM_LENGTH_MS`] later — so it cannot be
+        /// term, with the first election one full `TERM_LENGTH_MS` later — so it cannot be
         /// challenged immediately. `initial_netuid` is the governing subnet at deployment. The
-        /// candidate "owner" stake bar is the [`MIN_CANDIDATE_STAKE`] constant.
+        /// candidate "owner" stake bar is the `MIN_CANDIDATE_STAKE` constant.
         #[ink(constructor)]
         pub fn new(
             governance_address: AccountId,
@@ -485,7 +486,7 @@ mod election {
         }
 
         /// Raw (snapshot-frozen) alpha balance that has voted; measured against
-        /// [`quorum()`](TusdtElection::quorum).
+        /// `quorum()`(TusdtElection::quorum).
         #[ink(message)]
         pub fn total_voted_balance(&self) -> u128 {
             self.total_voted_balance
@@ -567,7 +568,7 @@ mod election {
         /// Registers the caller (coldkey) as a candidate governing `netuid`. Permissionless, but the
         /// coldkey must hold at least `min_candidate_stake` alpha in `netuid` (proven on-chain via
         /// the stake chain extension for `(hotkey, caller, netuid)`) so only a plausible subnet
-        /// owner can stand. Rejected if the caller has already served [`MAX_TERMS`]. No approval
+        /// owner can stand. Rejected if the caller has already served `MAX_TERMS`. No approval
         /// step — a registered candidate is immediately votable.
         #[ink(message)]
         pub fn register_candidate(&mut self, netuid: u16, hotkey: AccountId) -> Result<()> {
@@ -610,7 +611,7 @@ mod election {
         /// proven by `proof`. Each `(coldkey, hotkey)` leaf may approve exactly one candidate; a
         /// second `cast_approval` from the same leaf — for any candidate — is rejected.
         ///
-        /// The first vote of the cycle, cast on/after the [`VOTE_OPEN_DAY`] (the 5th), moves the cycle from
+        /// The first vote of the cycle, cast on/after the `VOTE_OPEN_DAY` (the 5th), moves the cycle from
         /// `Registration` to `Voting` and starts the 5-day calendar window (fixed to the 5th–10th of
         /// the month) from that vote.
         #[ink(message)]
@@ -710,7 +711,7 @@ mod election {
 
         /// Closes voting and decides the outcome (Voting → Elected or Idle). Permissionless; only
         /// callable after the voting window. The winner is the running leader, provided turnout
-        /// reached the [`QUORUM_BPS`] quorum and its approval weight is strictly greater than 50% of
+        /// reached the `QUORUM_BPS` quorum and its approval weight is strictly greater than 50% of
         /// the participating voting power. If no candidate clears both bars, the incumbent stays and
         /// the cadence advances.
         #[ink(message)]
@@ -780,13 +781,13 @@ mod election {
         }
 
         /// Installs the elected maintainer (Elected → Idle). Permissionless; callable on/after the
-        /// [`ACTIVATION_DAY`] (the 15th) — the winner is already decided, so anyone may push the
+        /// `ACTIVATION_DAY` (the 15th) — the winner is already decided, so anyone may push the
         /// installation through and the cycle can never stall on an absent winner. Installs the
         /// winner as governance's maintainer via the election-gated `elect_maintainer`; the new
         /// maintainer seats their own council on governance afterward. If the winner governs a
         /// different subnet, opens a 6-month transition during which the previous subnet stays
         /// authoritative and the netuid switch is deferred to
-        /// [`end_transition()`](TusdtElection::end_transition).
+        /// `end_transition()`(TusdtElection::end_transition).
         #[ink(message)]
         pub fn activate(&mut self) -> Result<()> {
             if self.phase != Phase::Elected {
@@ -939,7 +940,7 @@ mod election {
             Ok(())
         }
 
-        /// Ensures the caller is the current incumbent. Reverts with [`Error::NotIncumbent`]
+        /// Ensures the caller is the current incumbent. Reverts with `Error::NotIncumbent`
         /// otherwise.
         fn ensure_incumbent(&self) -> Result<()> {
             if self.env().caller() != self.incumbent {
@@ -949,8 +950,8 @@ mod election {
         }
 
         /// Reads the `(hotkey, coldkey, netuid)` raw alpha stake via the chain extension.
-        /// Reverts with [`Error::StakeQueryFailed`] if the chain extension call fails, or
-        /// [`Error::NoStake`] if no stake record is found for the triplet.
+        /// Reverts with `Error::StakeQueryFailed` if the chain extension call fails, or
+        /// `Error::NoStake` if no stake record is found for the triplet.
         fn read_candidate_stake(
             &self,
             hotkey: AccountId,
@@ -968,7 +969,7 @@ mod election {
 
         /// Raw cross-contract read of governance's latest snapshot, returned as
         /// `(root, circulating_supply, netuid, snapshot_block)`. Governance's `election_snapshot`
-        /// returns `Option`, so `None` (no snapshot committed) maps to [`Error::NoSnapshot`].
+        /// returns `Option`, so `None` (no snapshot committed) maps to `Error::NoSnapshot`.
         fn gov_latest_snapshot(&self) -> Result<(MerkleHash, u128, u16, u32)> {
             build_call::<tusdt_env::CustomEnvironment>()
                 .call(self.governance)
@@ -980,7 +981,7 @@ mod election {
 
         /// Raw cross-contract call to `governance.elect_maintainer(new_maintainer)`. Governance's
         /// `Error` is a fieldless enum, so its `Result<(), Error>` decodes layout-compatibly as
-        /// `Result<(), u8>`; any callee failure is mapped to [`Error::GovernanceCallFailed`].
+        /// `Result<(), u8>`; any callee failure is mapped to `Error::GovernanceCallFailed`.
         fn gov_elect_maintainer(&self, new_maintainer: AccountId) -> Result<()> {
             build_call::<tusdt_env::CustomEnvironment>()
                 .call(self.governance)

@@ -21,23 +21,37 @@ mod auction {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct Auction {
+        /// Sequential auction identifier.
         pub id: u32,
+        /// Owner of the liquidated vault.
         pub vault_owner: AccountId,
+        /// The liquidated vault's identifier within its owner's vaults.
         pub vault_id: u32,
 
+        /// Native TAO collateral recovered from the liquidated vault.
         pub collateral_balance: Balance,
+        /// Outstanding tUSDT debt that the winning bid repays.
         pub debt_balance: Balance,
+        /// Minimum acceptable bid.
         pub min_bid: Balance,
+        /// Oracle price (TUSDT per alpha) recorded when the liquidation was triggered.
         pub liquidation_price: Ratio,
 
+        /// Block timestamp when the auction opened.
         pub starts_at: u64,
+        /// Block timestamp when the auction ends.
         pub ends_at: u64,
 
+        /// Current leading bidder, if any.
         pub highest_bidder: Option<AccountId>,
+        /// Current highest bid amount.
         pub highest_bid: Balance,
+        /// Bid id of the current highest bid.
         pub highest_bid_id: Option<u32>,
+        /// Number of bids placed on this auction.
         pub bid_count: u32,
 
+        /// Whether the auction has been finalized after its end.
         pub is_finalized: bool,
     }
 
@@ -46,11 +60,17 @@ mod auction {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct Bid {
+        /// Per-auction sequential bid identifier.
         pub id: u32,
+        /// The auction this bid belongs to.
         pub auction_id: u32,
+        /// Account that placed the bid.
         pub bidder: AccountId,
+        /// Bid amount in TUSDT.
         pub amount: Balance,
+        /// Optional bidder-supplied metadata (e.g. originating hotkey).
         pub metadata: Option<BidMetadata>,
+        /// Whether the bid's refund (or winning-bid transfer) has been withdrawn.
         pub is_withdrawn: bool,
     }
 
@@ -59,6 +79,7 @@ mod auction {
     #[ink::scale_derive(Decode, Encode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct BidMetadata {
+        /// The originating hotkey the bidder attaches to this bid.
         pub hot_key: AccountId,
     }
 
@@ -171,7 +192,9 @@ mod auction {
         NotGovernance,
         /// Caller is not the configured admin.
         NotAdmin,
+        /// No auction found for the given ID.
         AuctionNotFound,
+        /// No bid found for the given (auction_id, bid_id) pair.
         BidNotFound,
         /// Caller is not the original bidder of the referenced bid.
         NotBidder,
@@ -203,6 +226,7 @@ mod auction {
         ArithmeticError,
     }
 
+    /// Result type for auction operations, wrapping the contract-specific [`Error`] enum.
     pub type Result<T> = core::result::Result<T, Error>;
 
     /// Internal staging value computed by `prepare_bid` before storage writes.
@@ -436,7 +460,7 @@ mod auction {
             self.active_vault_auction.remove((auction.vault_owner, auction.vault_id));
             self.remove_active_auction(auction_id)?;
 
-            let winner = auction.highest_bidder.expect("should have winner");
+            let winner = auction.highest_bidder.ok_or(Error::AuctionHasNoBids)?;
             let highest_bid = auction.highest_bid;
             let highest_bid_metadata = auction
                 .highest_bid_id
@@ -567,8 +591,8 @@ mod auction {
 
             let mut bids = Vec::new();
             for bid_id in start..end {
-                let bid = self.auction_bids.get((auction_id, bid_id));
-                bids.push(bid.expect("should be present"));
+                let bid = self.auction_bids.get((auction_id, bid_id)).ok_or(Error::BidNotFound)?;
+                bids.push(bid);
             }
 
             Ok(bids)
@@ -598,8 +622,8 @@ mod auction {
 
             let mut auctions = Vec::new();
             for auction_id in start..end {
-                let auction = self.auctions.get(auction_id);
-                auctions.push(auction.expect("should be present"));
+                let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
+                auctions.push(auction);
             }
 
             Ok(auctions)
@@ -617,8 +641,8 @@ mod auction {
 
             let mut auctions = Vec::new();
             for index in start..end {
-                let auction_id = self.active_auctions.get(index).expect("should be present");
-                let auction = self.auctions.get(auction_id).expect("should be present");
+                let auction_id = self.active_auctions.get(index).ok_or(Error::AuctionNotFound)?;
+                let auction = self.auctions.get(auction_id).ok_or(Error::AuctionNotFound)?;
                 auctions.push(auction);
             }
 

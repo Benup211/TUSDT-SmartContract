@@ -17,9 +17,9 @@ The contracts split into three layers:
 
 ## Prerequisites
 
-- Rust stable toolchain
+- Rust 1.89 (pinned via `rust-toolchain.toml` — rustup picks it up automatically)
 - `wasm32-unknown-unknown` target
-- `cargo-contract`
+- `cargo-contract` 5.x
 - Node.js + Yarn (for the isolated contract tooling under `tools/`)
 - A Contracts-enabled Substrate node (local or remote)
 
@@ -27,6 +27,20 @@ The contracts split into three layers:
 rustup target add wasm32-unknown-unknown
 cargo install --locked cargo-contract
 ```
+
+## Justfile
+
+One-command gates mirror CI (requires [`just`](https://github.com/casey/just)):
+
+| Command | What it does |
+|---|---|
+| `just fmt` | `cargo fmt --all` |
+| `just check` | `cargo check --workspace` |
+| `just test` | `cargo test --workspace` |
+| `just clippy` | `cargo clippy --workspace --all-targets -- -D warnings` |
+| `just lint` | `fmt` → `clippy-fix` → `clippy` |
+| `just build <name>` | Build one contract's artifacts (e.g. `just build tusdt-lending-pool`) |
+| `just build-all` | Build all 8 contracts' artifacts |
 
 ## Build
 
@@ -73,7 +87,42 @@ cargo test -p tusdt-vault-alpha
 cargo test -p tusdt-vault-alpha <test_name> -- --nocapture
 ```
 
-CI gate: `cargo fmt -- --check && cargo clippy --all-targets --all-features -- -D warnings && cargo test --workspace`
+### Panic-free policy (compiler-enforced)
+
+Contracts are **panic-free by construction** — the clippy lints that are denied workspace-wide in the root `Cargo.toml`:
+
+```
+arithmetic-side-effects = "deny"
+unwrap-used = "deny"
+expect-used = "deny"
+indexing-slicing = "deny"
+```
+
+Contract code must use `.ok_or(...)`/`checked_*`/`saturating_*`; a panic can never revert a
+message or brick a query. Rare provably-unreachable exceptions carry a narrowly-scoped `#[allow]`
+with a justification comment. Test modules opt out via the `#![allow(...)]` header at the top of
+each `tests.rs` (test ergonomics only — production code stays strict).
+
+CI gate: `cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace`
+
+> ⚠️ `cargo contract build` isolates each contract into a temp dir, so contracts define their
+> `[lints.clippy]` deny block **inline** in their own `Cargo.toml` — `lints.workspace = true`
+> inheritance is used only by the non-contract crates (`env`, `primitives`, `voting`,
+> `test-support`).
+
+## Test infrastructure (`test-support/`)
+
+The off-chain chain-extension mock (`MockExtension` — function ids 0/15/36/25/2|5|6 plus
+`register_mock*`/`set_caller` helpers) used to be copy-pasted into every contract's `tests.rs`.
+It now lives once in the `test-support` workspace crate and is wired as a dev-dependency of all 8
+contracts. When the chain extension gains a function id, update the mock **once**.
+
+## Error catalog (`docs/errors/`)
+
+Every `Error` variant of all 8 contracts is documented in `docs/errors/` — one page per contract
+with the enum's doc comment, the messages that return each variant, and client guidance (input
+error? authorization? retry?). `docs/errors/index.md` links them all. Add/rename a variant →
+update its page in the same commit.
 
 ## Contract Tooling (`tools/`)
 
@@ -209,6 +258,11 @@ The lending pool (`tusdt-lending-pool`) is a standalone protocol contract that e
 - **Borrow TAO/TUSDT** against Alpha collateral with health factor checks
 - **Direct liquidation** when health factor drops below 1.0 (close factor 50%, configurable bonus)
 
+Source layout: the contract module is split into `lib.rs` (storage, events, messages, queries) plus
+`params.rs` (interest/alpha/global param structs + validation), `rates.rs` (interest accrual,
+borrow-rate curve, cash accounting), and `risk.rs` (oracle pricing, health factor, borrow capacity,
+liquidation math).
+
 ### Deployment (Lending Pool)
 
 1. Upload the lending pool code and capture the code hash:
@@ -301,6 +355,9 @@ Alpha collateral continues earning native staking yield while supplied. A permis
 - `get_borrow_rate(market_id)`, `get_supply_rate(market_id)` — current annualized rates
 - `get_underlying_balance(market_id, user)` → underlying value of lToken position
 - `get_user_debt(market_id, user)` → current debt in underlying units
+- `get_user_debt_details(market_id, user)` → `(debt, principal)` — debt includes accrued
+  interest; `interest = debt − principal`. Principal is tracked in a dedicated mapping updated on
+  borrow/repay/liquidate; positions created before principal tracking fall back to an estimate.
 - `get_collateral_value_tusdt(user)`, `get_debt_value_tusdt(user)`, `get_health_factor(user)`
 - `get_available_borrow_tusdt(user)` → remaining borrowing capacity in TUSDT
 - `get_alpha_markets()` → `Vec<(netuid, AlphaMarketParams)>` — list all approved alpha markets

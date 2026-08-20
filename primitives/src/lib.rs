@@ -1,5 +1,5 @@
 #![cfg_attr(not(feature = "std"), no_std)]
-//! Shared primitive types for the tUSDT protocol. Provides the [`Ratio`] fixed-point arithmetic
+//! Shared primitive types for the tUSDT protocol. Provides the `Ratio` fixed-point arithmetic
 //! type (wrapping `FixedU128`) for basis-point and percentage calculations, together with
 //! exponential / power functions for the vault's discrete hourly compounding model, and a set of
 //! time-constant definitions used throughout the protocol.
@@ -31,6 +31,9 @@ const BASIS_POINTS_DENOMINATOR: u128 = 10_000;
 /// A fixed-point ratio wrapping `FixedU128` for on-chain arithmetic. Supports basis-point and
 /// percentage conversion, checked multiplication/division, and exponential/power operations for
 /// the vault's hourly compounding model.
+///
+/// Stores the raw `FixedU128` inner value at the 18-decimal fixed-point scale (`1e18`), so an
+/// inner value of `1_000_000_000_000_000_000` corresponds to `1.0` — see `Ratio::from_inner`.
 #[ink::scale_derive(Encode, Decode, TypeInfo)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
 #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
@@ -39,7 +42,7 @@ pub struct Ratio(u128);
 impl Ratio {
     /// Creates a `Ratio` from the raw `u128` inner value of a `FixedU128`. The
     /// 18-decimal-place fixed-point scale means `from_inner(1_000_000_000_000_000_000)` is
-    /// equivalent to `from_integer(1)`. **Prefer [`from_integer`] for whole-number ratios**
+    /// equivalent to `from_integer(1)`. **Prefer `from_integer` for whole-number ratios**
     /// — a raw inner of `1` represents ~1e-18, not 1.0.
     pub const fn from_inner(inner: u128) -> Self {
         Self(inner)
@@ -51,12 +54,12 @@ impl Ratio {
     }
 
     /// Creates a `Ratio` from a `u128` integer (maps to value × `FixedU128::DIV`).
+    ///
+    /// Saturates instead of panicking: a value so large that `value × 1e18`
+    /// overflows `u128` clamps to the maximum representable ratio. Unreachable
+    /// for any `Balance` (u64) derived input, which caps at ~1.8e19 < 3.4e20.
     pub fn from_integer(value: u128) -> Self {
-        Self(
-            FixedU128::checked_from_integer(value)
-                .expect("integer ratio should fit in fixed-point representation")
-                .into_inner(),
-        )
+        Self(FixedU128::saturating_from_integer(value).into_inner())
     }
 
     /// Creates a `Ratio` from a percentage (p / 100).
@@ -122,6 +125,23 @@ impl Ratio {
         value_fixed.checked_div(&self.as_fixed())?.checked_mul_int(1_u128)
     }
 
+    /// Divides a `u128` value by this `Ratio` (`value / self`), rounding UP to
+    /// the nearest integer — the Aave `rayDivUp` counterpart of
+    /// `checked_div_value`, used for scaled-debt conversions in the lending
+    /// pool. Ceiling division keeps a borrower's debt at least as large as the
+    /// amount they received (so borrow/repay bookkeeping can never understate
+    /// a position by dust) and guarantees a partial repayment never erases a
+    /// position through rounding while a full repayment still clears it
+    /// exactly. Returns `None` on overflow or when `self` is zero.
+    pub fn checked_div_value_ceil(self, value: u128) -> Option<u128> {
+        if self.0 == 0 {
+            return None;
+        }
+        let numerator = value.checked_mul(FIXED_SCALE)?;
+        let rounded = numerator.checked_add(self.0.checked_sub(1)?)?;
+        rounded.checked_div(self.0)
+    }
+
     /// Divides this `Ratio` by a `u128` integer (`self / rhs`). Returns `None` on overflow.
     pub fn checked_div_int(self, rhs: u128) -> Option<Self> {
         let rhs_fixed = FixedU128::checked_from_integer(rhs)?;
@@ -183,3 +203,6 @@ pub fn pow_fixed(mut base: FixedU128, mut exponent: u128) -> Option<FixedU128> {
 
     Some(result)
 }
+
+#[cfg(test)]
+mod tests;

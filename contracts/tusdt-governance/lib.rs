@@ -38,17 +38,23 @@ mod governance {
 
     /// Maximum CID byte length accepted by `submit_proposal` (CIDv1 base32 is ~62 chars).
     pub(crate) const MAX_CID_LEN: usize = 96;
-    /// The council is a fixed-size committee; [`TusdtGovernance::set_council`] requires exactly
+    /// The council is a fixed-size committee; `TusdtGovernance::set_council` requires exactly
     /// this many distinct members.
     pub(crate) const COUNCIL_SIZE: usize = 5;
+    /// Default governing subnet netuid (113), used at construction.
     pub(crate) const DEFAULT_NETUID: u16 = 113;
+    /// Default voting period in milliseconds (7 days).
     pub(crate) const DEFAULT_VOTING_PERIOD_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
+    /// Default minimum approval ratio in basis points (5_001 = 50.01%).
     pub(crate) const DEFAULT_APPROVAL_BPS: u32 = 5_001;
     /// Default quorum as a fraction of the alpha circulating supply, in basis points (2_000 = 20%).
     pub(crate) const DEFAULT_QUORUM_BPS: u32 = 2_000;
+    /// Default minimum proposer stake; unused in the current council-only proposal model,
+    /// kept for SCALE compatibility.
     pub(crate) const DEFAULT_MIN_PROPOSER_STAKE: u128 = 1_000_000_000_000;
     /// Proposals may only be submitted on these days of the month (inclusive), in UTC.
     pub(crate) const DEFAULT_SUBMISSION_OPEN_DAY: u8 = 20;
+    /// Last day-of-month (UTC, inclusive) on which proposals may be submitted.
     pub(crate) const DEFAULT_SUBMISSION_CLOSE_DAY: u8 = 27;
 
     /// Tunable governance parameters. Updatable by the maintainer.
@@ -61,7 +67,7 @@ mod governance {
         pub voting_period_ms: u64,
         /// Quorum as a fraction of the alpha circulating supply, in basis points (2_000 = 20%).
         /// A proposal passes only if the raw balance that voted reaches `circulating_supply *
-        /// quorum_bps / 10_000`; see [`quorum`].
+        /// quorum_bps / 10_000`; see `quorum`.
         pub quorum_bps: u32,
         /// Minimum approval ratio in basis points (5_001 = 50.01%). Weighted by voting power:
         /// `yes * 10_000 / (yes + no) >= approval_bps`.
@@ -75,6 +81,7 @@ mod governance {
     }
 
     impl GovernanceParams {
+        /// Returns the default governance parameters.
         pub fn default_params() -> Self {
             Self {
                 voting_period_ms: DEFAULT_VOTING_PERIOD_MS,
@@ -114,20 +121,27 @@ mod governance {
     #[ink::scale_derive(Encode, Decode, TypeInfo)]
     #[cfg_attr(feature = "std", derive(ink::storage::traits::StorageLayout))]
     pub struct Proposal {
+        /// Sequential proposal identifier.
         pub id: u64,
+        /// Account that submitted the proposal (a council member).
         pub proposer: AccountId,
+        /// Content-addressed identifier of the off-chain proposal document.
         pub cid: String,
+        /// Funding vs signal-only payload (see `ProposalKind`).
         pub kind: ProposalKind,
+        /// Block timestamp when the proposal was submitted.
         pub created_at: Timestamp,
+        /// Block timestamp when voting closes.
         pub voting_ends_at: Timestamp,
         /// Snapshot epoch this proposal is bound to; votes prove membership against its root.
         pub snapshot_epoch: u64,
-        /// Accumulated voting power in favor (see [`Voted::weight`]).
+        /// Accumulated voting power in favor (see `Voted::weight`).
         pub yes: u128,
         /// Accumulated voting power against.
         pub no: u128,
         /// Sum of raw (snapshot-frozen) alpha balance that has voted; measured against the quorum.
         pub voted_balance: u128,
+        /// Current lifecycle stage (see `ProposalStatus`).
         pub status: ProposalStatus,
     }
 
@@ -152,13 +166,13 @@ mod governance {
     pub struct TusdtGovernance {
         /// Top authority: governs parameters and council membership. This is the *elected* account
         /// (the winning subnet owner), not a contract. It is replaced only by the election contract
-        /// via [`TusdtGovernance::elect_maintainer`].
+        /// via `TusdtGovernance::elect_maintainer`.
         maintainer: AccountId,
         /// The election contract. It is authorized to install the maintainer (`elect_maintainer`)
         /// and apply netuid switches (`election_set_netuid`).
         election: TusdtElectionRef,
-        /// The operating committee, set by the maintainer via [`TusdtGovernance::set_council`].
-        /// Holds exactly [`COUNCIL_SIZE`] members once seated (empty until the first call); council
+        /// The operating committee, set by the maintainer via `TusdtGovernance::set_council`.
+        /// Holds exactly `COUNCIL_SIZE` members once seated (empty until the first call); council
         /// members perform operational duties such as committing snapshots.
         council: Vec<AccountId>,
         treasury: TusdtTreasuryRef,
@@ -170,7 +184,7 @@ mod governance {
         oracle: TusdtOracleRef,
         pool: TusdtLendingPoolRef,
         /// The subnet whose alpha stake gates proposer eligibility. Bound to the elected maintainer
-        /// (the subnet they govern) — only the election contract changes it, via [`TusdtGovernance::election_set_netuid`].
+        /// (the subnet they govern) — only the election contract changes it, via `TusdtGovernance::election_set_netuid`.
         netuid: u16,
         params: GovernanceParams,
         // Latest committed snapshot epoch; 0 means no snapshot has been submitted yet.
@@ -327,6 +341,7 @@ mod governance {
         ArithmeticError,
     }
 
+    /// Result type for governance operations, wrapping the contract-specific `Error` enum.
     pub type Result<T> = core::result::Result<T, Error>;
 
     impl TusdtGovernance {
@@ -339,10 +354,10 @@ mod governance {
         /// (`election_set_netuid`). The initial maintainer is also seated as the election's initial
         /// incumbent. The election derives its genesis cadence anchor from the deployment block
         /// timestamp and its candidate stake bar from its own constant. The council starts empty and
-        /// must be seated by the maintainer via [`set_council`].
+        /// must be seated by the maintainer via `set_council`.
         ///
         /// The vault/auction/oracle addresses are wired so governance can forward privileged calls
-        /// to them once it holds their `governance` role (see [`external_calls`]).
+        /// to them once it holds their `governance` role (see `external_calls`).
         #[ink(constructor)]
         pub fn new(
             treasury_address: AccountId,
@@ -372,7 +387,7 @@ mod governance {
         }
 
         /// Builds the storage struct from the addresses of the already-deployed peer contracts. Used
-        /// by [`new`] (after it instantiates the election) and by unit tests (which can't instantiate
+        /// by `new` (after it instantiates the election) and by unit tests (which can't instantiate
         /// cross-contracts, so they pass a stand-in `election` address that `ensure_election` checks
         /// against). All refs are reconstructed from their `AccountId` via `FromAccountId`.
         pub(crate) fn from_addresses(
@@ -535,7 +550,7 @@ mod governance {
         }
 
         /// Replaces the entire council with `members`; maintainer-only. Requires exactly
-        /// [`COUNCIL_SIZE`] distinct members, otherwise returns [`Error::InvalidCouncil`].
+        /// `COUNCIL_SIZE` distinct members, otherwise returns `Error::InvalidCouncil`.
         #[ink(message)]
         pub fn set_council(&mut self, members: Vec<AccountId>) -> Result<()> {
             self.ensure_maintainer()?;
@@ -700,11 +715,13 @@ mod governance {
 
         // ----- Lending Pool: maintainer-gated (governing/config) -----
 
+        /// Approves or removes a netuid for lending-pool collateral; maintainer-only.
         #[ink(message)]
         pub fn pool_set_approved_netuid(&mut self, netuid: u16, approved: bool) -> Result<()> {
             self.forward_pool_set_approved_netuid(netuid, approved)
         }
 
+        /// Schedules a timelocked alpha-market parameter update on the lending pool; maintainer-only.
         #[ink(message)]
         pub fn pool_set_alpha_params(
             &mut self,
@@ -714,11 +731,13 @@ mod governance {
             self.forward_pool_set_alpha_params(netuid, config)
         }
 
+        /// Cancels the lending pool's scheduled alpha-market parameter update; maintainer-only.
         #[ink(message)]
         pub fn pool_cancel_alpha_params_update(&mut self, netuid: u16) -> Result<()> {
             self.forward_pool_cancel_alpha_params_update(netuid)
         }
 
+        /// Schedules a timelocked interest-rate (market) parameter update on the lending pool; maintainer-only.
         #[ink(message)]
         pub fn pool_set_market_params(
             &mut self,
@@ -728,36 +747,43 @@ mod governance {
             self.forward_pool_set_market_params(market_id, config)
         }
 
+        /// Cancels the lending pool's scheduled market parameter update; maintainer-only.
         #[ink(message)]
         pub fn pool_cancel_market_params_update(&mut self, market_id: u8) -> Result<()> {
             self.forward_pool_cancel_market_params_update(market_id)
         }
 
+        /// Schedules a timelocked global-parameter update on the lending pool; maintainer-only.
         #[ink(message)]
         pub fn pool_set_global_params(&mut self, config: PoolGlobalParamsConfig) -> Result<()> {
             self.forward_pool_set_global_params(config)
         }
 
+        /// Cancels the lending pool's scheduled global-parameter update; maintainer-only.
         #[ink(message)]
         pub fn pool_cancel_global_params_update(&mut self) -> Result<()> {
             self.forward_pool_cancel_global_params_update()
         }
 
+        /// Updates the lending pool's platform (pause operator) account; maintainer-only.
         #[ink(message)]
         pub fn pool_update_platform(&mut self, new_platform: AccountId) -> Result<()> {
             self.forward_pool_update_platform(new_platform)
         }
 
+        /// Updates the lending pool's treasury (fee recipient) account; maintainer-only.
         #[ink(message)]
         pub fn pool_update_treasury(&mut self, new_treasury: AccountId) -> Result<()> {
             self.forward_pool_update_treasury(new_treasury)
         }
 
+        /// Updates the lending pool's oracle contract address; maintainer-only.
         #[ink(message)]
         pub fn pool_update_oracle_address(&mut self, new_oracle: AccountId) -> Result<()> {
             self.forward_pool_update_oracle_address(new_oracle)
         }
 
+        /// Updates the lending pool's lToken contract address for a market; maintainer-only.
         #[ink(message)]
         pub fn pool_update_ltoken_address(
             &mut self,
@@ -767,6 +793,7 @@ mod governance {
             self.forward_pool_update_ltoken_address(market_id, new_ltoken)
         }
 
+        /// Migrates the lending pool's staking hotkey to a new address; maintainer-only.
         #[ink(message)]
         pub fn pool_update_pool_hotkey(
             &mut self,
@@ -776,21 +803,25 @@ mod governance {
             self.forward_pool_update_pool_hotkey(new_hotkey, netuids)
         }
 
+        /// Claims surplus TUSDT held by the lending pool and sends it to the treasury; maintainer-only.
         #[ink(message)]
         pub fn pool_claim_surplus_tusdt(&mut self, amount: Balance) -> Result<()> {
             self.forward_pool_claim_surplus_tusdt(amount)
         }
 
+        /// Transfers the lending pool's native TAO balance to the treasury; maintainer-only.
         #[ink(message)]
         pub fn pool_transfer_native_to_treasury(&mut self) -> Result<()> {
             self.forward_pool_transfer_native_to_treasury()
         }
 
+        /// Unpauses the lending pool; maintainer-only (deliberate recovery).
         #[ink(message)]
         pub fn pool_unpause(&mut self) -> Result<()> {
             self.forward_pool_unpause()
         }
 
+        /// Updates the lending pool's maintainer account; maintainer-only.
         #[ink(message)]
         pub fn pool_update_maintainer(&mut self, new_maintainer: AccountId) -> Result<()> {
             self.forward_pool_update_maintainer(new_maintainer)
@@ -827,7 +858,7 @@ mod governance {
         /// Commits a new off-chain snapshot and returns its epoch; council-only (operational duty).
         ///
         /// `root` is the Merkle root over `(coldkey, hotkey, balance, multiplier_bps)` leaves (see
-        /// [`Snapshot`]); `circulating_supply` is the alpha supply that the quorum is derived from;
+        /// `Snapshot`); `circulating_supply` is the alpha supply that the quorum is derived from;
         /// `snapshot_block` records the subnet height for off-chain auditing. Each call advances the
         /// epoch by one; proposals submitted afterward bind to the new epoch.
         #[ink(message)]
@@ -852,7 +883,7 @@ mod governance {
 
         /// Returns the absolute quorum threshold for `epoch`: `circulating_supply * quorum_bps /
         /// 10_000`. A proposal must gather at least this much raw voted balance (see
-        /// [`Proposal::voted_balance`]) to be eligible to pass. Returns 0 if the epoch has no
+        /// `Proposal::voted_balance`) to be eligible to pass. Returns 0 if the epoch has no
         /// snapshot.
         #[ink(message)]
         pub fn quorum(&self, epoch: u64) -> u128 {

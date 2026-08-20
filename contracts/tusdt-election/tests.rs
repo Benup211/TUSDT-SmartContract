@@ -1,7 +1,12 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
 // Unit tests use ergonomic plain arithmetic on bounded constants; the strict numeric lints
 // aren't useful here and would just clutter assertions.
 #![allow(
-    clippy::arithmetic_side_effects,
     clippy::cast_possible_truncation,
     clippy::cast_possible_wrap,
     clippy::cast_sign_loss,
@@ -11,7 +16,7 @@
 use super::election::*;
 use ink::prelude::vec::Vec;
 use ink::primitives::AccountId;
-use tusdt_env::StakeInfo;
+use tusdt_test_support::{register_extension, set_caller, MockExtension};
 
 type Env = tusdt_env::CustomEnvironment;
 
@@ -34,12 +39,6 @@ fn accounts() -> ink::env::test::DefaultAccounts<Env> {
     ink::env::test::default_accounts::<Env>()
 }
 
-fn set_caller(caller: AccountId) {
-    let callee = ink::env::account_id::<Env>();
-    ink::env::test::set_callee::<Env>(callee);
-    ink::env::test::set_caller::<Env>(caller);
-}
-
 fn set_block_timestamp(ts: u64) {
     ink::env::test::set_block_timestamp::<Env>(ts);
 }
@@ -47,35 +46,8 @@ fn set_block_timestamp(ts: u64) {
 /// Off-chain mock of the `get_stake_info_for_hotkey_coldkey_netuid` chain extension used by
 /// `register_candidate`. `stake = Some(v)` resolves to a `StakeInfo` with that alpha stake;
 /// `None` mimics a (hotkey, coldkey) pair with no stake record.
-struct StakeExtension {
-    stake: Option<u64>,
-}
-
-impl ink::env::test::ChainExtension for StakeExtension {
-    fn ext_id(&self) -> u16 {
-        0x1000
-    }
-
-    fn call(&mut self, _func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
-        let a = accounts();
-        let info = self.stake.map(|stake| StakeInfo {
-            hotkey: a.alice,
-            coldkey: a.alice,
-            netuid: ink::scale::Compact(113),
-            stake: ink::scale::Compact(stake),
-            locked: ink::scale::Compact(0),
-            emission: ink::scale::Compact(0),
-            tao_emission: ink::scale::Compact(0),
-            drain: ink::scale::Compact(0),
-            is_registered: true,
-        });
-        ink::scale::Encode::encode_to(&info, output);
-        0
-    }
-}
-
 fn register_stake(stake: Option<u64>) {
-    ink::env::test::register_chain_extension(StakeExtension { stake });
+    register_extension(MockExtension::subnet_stake(stake));
 }
 
 /// Single-leaf electorate snapshot for voter (alice/alice, 4e12, 1.0x) on subnet 113.

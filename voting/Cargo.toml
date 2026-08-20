@@ -14,3 +14,6 @@ path = "src/lib.rs"
 [features]
 default = ["std"]
 std = ["ink/std"]
+
+[lints]
+workspace = true

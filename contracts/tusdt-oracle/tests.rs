@@ -1,16 +1,17 @@
+#![allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::indexing_slicing,
+    clippy::arithmetic_side_effects
+)]
+
 use super::oracle::*;
-use tusdt_env::StakeInfo;
 use tusdt_primitives::Ratio;
+use tusdt_test_support::{register_extension, set_caller, MockExtension};
 
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
-
-fn set_caller(caller: ink::primitives::AccountId) {
-    let callee = ink::env::account_id::<tusdt_env::CustomEnvironment>();
-    ink::env::test::set_callee::<tusdt_env::CustomEnvironment>(callee);
-    ink::env::test::set_caller::<tusdt_env::CustomEnvironment>(caller);
-}
 
 fn set_time(timestamp: u64) {
     ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(timestamp);
@@ -44,77 +45,35 @@ fn submit_price_with_metadata(
 }
 
 // ---------------------------------------------------------------------------
-// Chain-extension mock (same pattern as governance/election tests)
+// Chain-extension mock (shared `tusdt_test_support::MockExtension`, oracle knobs)
 // ---------------------------------------------------------------------------
-
-struct StakeExtension {
-    stake: Option<u64>,
-    is_registered: bool,
-    should_fail: bool,
-}
-
-impl ink::env::test::ChainExtension for StakeExtension {
-    fn ext_id(&self) -> u16 {
-        0x1000
-    }
-
-    fn call(&mut self, _func_id: u16, _input: &[u8], output: &mut Vec<u8>) -> u32 {
-        if self.should_fail {
-            return 1; // ReadFailed
-        }
-        let info = self.stake.map(|stake| StakeInfo {
-            hotkey: ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>().alice,
-            coldkey: ink::env::test::default_accounts::<tusdt_env::CustomEnvironment>().alice,
-            netuid: ink::scale::Compact(113),
-            stake: ink::scale::Compact(stake),
-            locked: ink::scale::Compact(0),
-            emission: ink::scale::Compact(0),
-            tao_emission: ink::scale::Compact(0),
-            drain: ink::scale::Compact(0),
-            is_registered: self.is_registered,
-        });
-        ink::scale::Encode::encode_to(&info, output);
-        0
-    }
-}
 
 /// Default stake returned by the mock, above the 1e12 minimum threshold.
 const MOCK_STAKE_ABOVE_THRESHOLD: u64 = 2_000_000_000_000;
 
 /// Register a mock that reports a registered neuron with stake above the minimum.
 fn register_stake(registered: bool) {
-    ink::env::test::register_chain_extension(StakeExtension {
-        stake: Some(MOCK_STAKE_ABOVE_THRESHOLD),
-        is_registered: registered,
-        should_fail: false,
-    });
+    register_extension(
+        MockExtension::subnet_stake(Some(MOCK_STAKE_ABOVE_THRESHOLD))
+            .with_is_registered(registered),
+    );
 }
 
 /// Register a mock that returns a registered neuron but with stake below the minimum.
 fn register_low_stake() {
-    ink::env::test::register_chain_extension(StakeExtension {
-        stake: Some(1),
-        is_registered: true,
-        should_fail: false,
-    });
+    register_extension(MockExtension::subnet_stake(Some(1)));
 }
 
 /// Register a mock that returns no stake record at all.
 fn register_no_stake() {
-    ink::env::test::register_chain_extension(StakeExtension {
-        stake: None,
-        is_registered: false,
-        should_fail: false,
-    });
+    register_extension(MockExtension::subnet_stake(None).with_is_registered(false));
 }
 
 /// Register a mock that simulates a chain-extension error (status code 1).
 fn register_failing_extension() {
-    ink::env::test::register_chain_extension(StakeExtension {
-        stake: None,
-        is_registered: false,
-        should_fail: true,
-    });
+    register_extension(
+        MockExtension::subnet_stake(None).with_is_registered(false).with_should_fail(true),
+    );
 }
 
 // ========================================================================
