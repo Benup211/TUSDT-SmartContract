@@ -795,6 +795,7 @@ fn market_state_defaults() {
     let state = pool.get_market_state(0).unwrap();
     assert_eq!(state.total_supplied, 0);
     assert_eq!(state.total_debt, 0);
+    assert_eq!(state.total_scaled_debt, 0);
     assert_eq!(state.borrow_index, Ratio::one());
     assert_eq!(state.exchange_rate, Ratio::one());
 }
@@ -854,6 +855,7 @@ fn underlying_balance_view_quotes_exchange_rate() {
         MarketState {
             total_supplied: 90_909_090_909,
             total_debt: 0,
+            total_scaled_debt: 0,
             borrow_index: Ratio::one(),
             exchange_rate: Ratio::from_inner(1_100_000_000_000_000_000),
             reserve_accrued: 0,
@@ -879,6 +881,7 @@ fn exchange_rate_resets_when_market_fully_drains() {
     let mut state = MarketState {
         total_supplied: 0,
         total_debt: 0,
+        total_scaled_debt: 0,
         borrow_index: Ratio::from_inner(1_050_000_000_000_000_000),
         exchange_rate: Ratio::from_inner(1_100_000_000_000_000_000),
         reserve_accrued: 0,
@@ -900,6 +903,7 @@ fn exchange_rate_survives_debt_repayment_while_supplied() {
     let mut state = MarketState {
         total_supplied: 100_000_000_000,
         total_debt: 0,
+        total_scaled_debt: 0,
         borrow_index: Ratio::one(),
         exchange_rate: Ratio::from_inner(1_100_000_000_000_000_000),
         reserve_accrued: 0,
@@ -1667,41 +1671,155 @@ fn borrow_scaling_rounds_up_to_never_understate_debt() {
 }
 
 #[ink::test]
-fn repay_clamps_to_market_total_debt_when_ledger_drifted() {
-    // Regression: with total_debt below the user's position debt (ledger drift
-    // from the historical reversed-division bug), repaying the user's full debt
-    // underflowed `total_debt.checked_sub` into ArithmeticError. The repay now
-    // clamps to the market total; a zero clamped amount is a clean no-op that
-    // happens before the token pull.
+fn full_repay_bookkeeping_clears_position_and_total_exactly() {
+    // Regression (production bug, 2026-08): with the market total tracked in
+    // face units and repay clamped to `min(repay, total_debt)`, a MAX
+    // repayment could leave the position stuck with dust (live signature:
+    // debt 1 rao on market 0, 2 rao on market 1, total_debt == 0, repay
+    // no-opping forever). With scaled-total accounting the market total and
+    // the position lose the SAME scaled units, so a full repayment always
+    // clears both exactly. The repay messages pull the ERC20 / transferred
+    // value before their effects and cannot run in the off-chain env, so the
+    // bookkeeping is pinned at the conversion level with the exact helpers
+    // repay_tao/repay_tusdt/liquidate use.
+    let index = Ratio::from_inner(1_000_316_946_018_546_683); // live testnet index
+
+    // Live-chain stuck signature: scaled 1 at this index displays debt 1
+    // (market 0), scaled 2 displays debt 2 (market 1).
+    for scaled in [1_u128, 2] {
+        let debt = index
+            .checked_mul_value(scaled)
+            .expect("debt recompute must not overflow");
+        assert_eq!(debt, scaled, "scaled {scaled} displays exactly {scaled} rao of debt");
+
+        // repay_amount = min(MAX, debt) = debt → the full-repay branch sets
+        // scaled_repaid = pos.scaled_debt. The ceil-on-borrow / floor-on-
+        // display pairing must make the round trip exact.
+        let scaled_repaid = index
+            .checked_div_value_ceil(debt)
+            .expect("full repay scaling must not overflow");
+        assert_eq!(scaled_repaid, scaled, "full repay of displayed debt clears scaled exactly");
+
+        // Market total side (lockstep): total_scaled_debt -= scaled_repaid
+        // lands on exactly 0 and the derived face follows.
+        let remaining_scaled = scaled.checked_sub(scaled_repaid).expect("no underflow");
+        assert_eq!(remaining_scaled, 0, "no scaled dust survives the last repay");
+        assert_eq!(
+            scaled_debt_to_face(0, index),
+            Some(0),
+            "face total hits exactly 0 — position gone, utilization 0"
+        );
+    }
+}
+
+#[ink::test]
+fn scaled_total_keeps_face_total_at_least_the_sum_of_user_debts() {
+    // Invariant the fix restores: face total = floor(Σscaled × index) is
+    // always >= every user's displayed debt floor(scaled_i × index) (floor is
+    // monotonic), so a MAX repayment can never be truncated by a total-debt
+    // clamp and the LAST borrower can always clear the market. This is what
+    // the removed `min(repay, total_debt)` clamp previously violated once
+    // independent floor rounding had drifted the face total down.
+    let index = Ratio::from_inner(1_400_000_000_000_000_000); // 1.4
+    let a: u64 = 2;
+    let b: u64 = 3;
+    let total_scaled = 5u64;
+
+    let total_face = scaled_debt_to_face(total_scaled, index).unwrap();
+    let a_face = scaled_debt_to_face(a, index).unwrap();
+    let b_face = scaled_debt_to_face(b, index).unwrap();
+    assert_eq!((total_face, a_face, b_face), (7, 2, 4));
+    assert!(total_face >= a_face && total_face >= b_face, "every user is fully repayable");
+
+    // A fully repays: scaled_repaid = ceil(a_face / index) == a exactly.
+    let a_repaid = index
+        .checked_div_value_ceil(a_face.into())
+        .expect("full repay scaling must not overflow");
+    assert_eq!(a_repaid as u64, a, "full repay round-trips the position's scaled debt");
+    let remaining_scaled = total_scaled.checked_sub(a).unwrap();
+    let remaining_face = scaled_debt_to_face(remaining_scaled, index).unwrap();
+    assert!(remaining_face >= b_face, "B is still fully repayable after A exits");
+
+    // B (the last borrower) fully repays: the market hits exact zero.
+    let b_repaid = index
+        .checked_div_value_ceil(b_face.into())
+        .expect("full repay scaling must not overflow");
+    assert_eq!(b_repaid as u64, b, "last full repay round-trips exactly");
+    assert_eq!(
+        scaled_debt_to_face(remaining_scaled.checked_sub(b).unwrap(), index),
+        Some(0),
+        "last repay drives the face total to exactly 0 — no ghost dust"
+    );
+}
+
+#[ink::test]
+fn accrue_interest_derives_face_total_from_scaled_total() {
+    // Regression: accrual used to compound the face total independently
+    // (`floor(total_debt × growth)` on a stale floored integer), drifting it
+    // below the sum of per-user debts — the interest-driven engine of the
+    // unrepayable-dust bug. Now the scaled total is never mutated by accrual
+    // (interest accrues purely through index growth) and the face total is
+    // re-derived from it at the new index, keeping both in lockstep.
+    // Market 0 (TAO) is used because market_cash needs no cross-contract call
+    // in the off-chain env; the accrual path under test is shared.
     let (mut pool, accounts) = setup();
     set_caller(accounts.alice);
 
+    let scaled: u64 = 128_000_000_000; // 128 TAO (9 decimals)
     pool.debug_set_market_state(
-        1,
+        0,
         MarketState {
-            total_supplied: 129_000_000_000,
-            total_debt: 0, // fully drained by drift
+            total_supplied: 130_000_000_000,
+            total_debt: scaled, // index 1.0 → face == scaled
+            total_scaled_debt: scaled,
             borrow_index: Ratio::one(),
             exchange_rate: Ratio::one(),
             reserve_accrued: 0,
             last_update: 0,
         },
     );
-    pool.debug_set_position(
-        1,
-        accounts.alice,
-        Position { ltoken_balance: 0, scaled_debt: 12, alpha_principal: 0 },
+
+    ink::env::test::set_block_timestamp::<tusdt_env::CustomEnvironment>(
+        tusdt_primitives::MILLISECONDS_PER_HOUR + 1,
     );
-    pool.debug_set_debt_principal(1, accounts.alice, 12);
+    pool.accrue_interest(0).unwrap();
 
-    // Repaying the full debt against an empty market total must not underflow:
-    // it clamps to zero and no-ops before touching the token contract.
-    assert_eq!(pool.repay_tusdt(12), Ok(()));
+    let state = pool.get_market_state(0).unwrap();
+    assert_eq!(state.total_scaled_debt, scaled, "scaled total is never mutated by accrual");
+    assert_eq!(
+        state.total_debt,
+        scaled_debt_to_face(scaled, state.borrow_index).unwrap(),
+        "face total is exactly floor(total_scaled_debt × borrow_index / 1e18)"
+    );
+    assert!(state.total_debt >= scaled, "interest accrues into the face total");
+}
 
-    let state = pool.get_market_state(1).unwrap();
-    assert_eq!(state.total_debt, 0, "no debt should have been deducted");
-    let (debt, principal) = pool.get_user_debt_details(1, accounts.alice).unwrap();
-    assert_eq!((debt, principal), (12, 12), "position untouched");
+#[ink::test]
+fn liquidate_bookkeeping_subtracts_the_same_scaled_units_from_total_and_position() {
+    // The liquidate message ends in cross-contract calls (oracle/ERC20) that
+    // cannot run off-chain; pin its debt bookkeeping at the conversion level
+    // with the exact helpers it uses. A full-debt liquidation must clear the
+    // position AND shrink the market total by the SAME scaled delta, so the
+    // borrower's dust can never migrate into the market total.
+    let index = Ratio::from_inner(1_400_000_000_000_000_000); // 1.4
+    let pos_scaled: u64 = 3;
+    let total_scaled: u64 = pos_scaled + 5; // another borrower holds 5 scaled units
+
+    let borrower_debt = scaled_debt_to_face(pos_scaled, index).unwrap();
+    assert_eq!(borrower_debt, 4);
+
+    // liquidate: actual_debt_units = min(cover, borrower_debt) = borrower_debt
+    // (full cover) → scaled_repaid = min(ceil(borrower_debt / index), pos_scaled).
+    let scaled_repaid = index
+        .checked_div_value_ceil(borrower_debt.into())
+        .expect("ceil scaling must not overflow");
+    assert_eq!(scaled_repaid as u64, pos_scaled, "full liquidation round-trips exactly");
+
+    // total_scaled_debt -= scaled_repaid → the other borrower's 5 scaled units
+    // remain and the derived face total tracks them exactly.
+    let remaining_scaled = total_scaled.checked_sub(pos_scaled).unwrap();
+    let remaining_face = scaled_debt_to_face(remaining_scaled, index).unwrap();
+    assert_eq!((remaining_scaled, remaining_face), (5, 7));
 }
 
 #[ink::test]
@@ -1769,6 +1887,7 @@ fn accrue_market_interest_refreshes_both_markets_permissionlessly() {
         MarketState {
             total_supplied: 130_000_000_000,
             total_debt: 128_000_000_000,
+            total_scaled_debt: 128_000_000_000,
             borrow_index: Ratio::one(),
             exchange_rate: Ratio::one(),
             reserve_accrued: 0,
@@ -1780,6 +1899,7 @@ fn accrue_market_interest_refreshes_both_markets_permissionlessly() {
         MarketState {
             total_supplied: 129_000_000_000,
             total_debt: 0,
+            total_scaled_debt: 0,
             borrow_index: Ratio::one(),
             exchange_rate: Ratio::one(),
             reserve_accrued: 0,
@@ -1838,6 +1958,7 @@ fn accrual_produces_interest_after_an_hour() {
         MarketState {
             total_supplied: 130_000_000_000,
             total_debt: debt,
+            total_scaled_debt: debt,
             borrow_index: Ratio::one(),
             exchange_rate: Ratio::one(),
             reserve_accrued: 0,
@@ -1889,6 +2010,7 @@ fn sub_hour_remainder_is_not_discarded() {
         MarketState {
             total_supplied: 130_000_000_000,
             total_debt: debt,
+            total_scaled_debt: debt,
             borrow_index: Ratio::one(),
             exchange_rate: Ratio::one(),
             reserve_accrued: 0,
