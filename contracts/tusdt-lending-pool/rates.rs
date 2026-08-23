@@ -38,7 +38,7 @@ impl TusdtLendingPool {
             let mut state = self.markets.get(market_id).ok_or(Error::MarketNotFound)?;
             let dt_ms = now.checked_sub(state.last_update).ok_or(Error::ArithmeticError)?;
             let dt_hours = dt_ms / tusdt_primitives::MILLISECONDS_PER_HOUR;
-            if state.total_debt == 0 {
+            if state.total_scaled_debt == 0 {
                 // Nothing to accrue; keep the clock on real time. There is no
                 // debt whose sub-hour remainder could be starved.
                 if dt_ms > 0 {
@@ -89,11 +89,18 @@ impl TusdtLendingPool {
             let supply_growth = ratio_add(one, supply_rate_hourly)
                 .and_then(|f| f.checked_pow(dt_hours.into()))
                 .ok_or(Error::ArithmeticError)?;
+            // Scaled-total accounting: the face total is derived from the
+            // scaled total at the NEW borrow index. Compounding a stale floored
+            // integer (the previous approach) drifted the total away from the
+            // sum of per-user `scaled_debt × borrow_index` floors — the root
+            // cause of unrepayable dust. The scaled total is never mutated
+            // here: interest accrues purely through index growth.
+            let new_borrow_index =
+                state.borrow_index.checked_mul(borrow_growth).ok_or(Error::ArithmeticError)?;
             let debt_before = state.total_debt;
-            let new_debt = borrow_growth
-                .checked_mul_value(debt_before.into())
-                .and_then(|v| Balance::try_from(v).ok())
-                .ok_or(Error::ArithmeticError)?;
+            let new_debt =
+                scaled_debt_to_face(state.total_scaled_debt, new_borrow_index)
+                    .ok_or(Error::ArithmeticError)?;
             let debt_interest = new_debt.checked_sub(debt_before).ok_or(Error::ArithmeticError)?;
             let new_exchange_rate =
                 state.exchange_rate.checked_mul(supply_growth).ok_or(Error::ArithmeticError)?;
@@ -103,8 +110,7 @@ impl TusdtLendingPool {
                 .unwrap_or(0);
             let reserve_delta = debt_interest.saturating_sub(supply_interest);
             state.total_debt = new_debt;
-            state.borrow_index =
-                state.borrow_index.checked_mul(borrow_growth).ok_or(Error::ArithmeticError)?;
+            state.borrow_index = new_borrow_index;
             state.exchange_rate = new_exchange_rate;
             state.reserve_accrued =
                 state.reserve_accrued.checked_add(reserve_delta).ok_or(Error::ArithmeticError)?;

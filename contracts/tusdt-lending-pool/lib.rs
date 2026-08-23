@@ -103,6 +103,16 @@ mod lending_pool {
         }
     }
 
+    /// Converts a scaled debt amount to its face value under a borrow index:
+    /// `floor(scaled × borrow_index / 1e18)`. Single source of truth for the
+    /// derived market `total_debt` — every mutation site recomputes the face
+    /// total from `total_scaled_debt` through this helper so it stays exactly
+    /// consistent with the per-user formula used by `get_user_debt`.
+    /// Returns `None` on overflow.
+    pub(crate) fn scaled_debt_to_face(scaled: Balance, index: Ratio) -> Option<Balance> {
+        index.checked_mul_value(scaled.into()).and_then(|v| Balance::try_from(v).ok())
+    }
+
     /// Per-market runtime accrual state. Markets 0 (TAO) and 1 (TUSDT) are supply+borrow
     /// markets with interest accrual. Markets 2+ are alpha collateral-only markets (one per
     /// approved subnet); their MarketState exists but accrual is a no-op.
@@ -117,7 +127,17 @@ mod lending_pool {
         /// the lTokens themselves, so this always equals the lToken supply.
         pub total_supplied: Balance,
         /// Total outstanding debt in underlying units (includes accrued interest).
+        /// Always derived as `floor(total_scaled_debt × borrow_index / 1e18)`
+        /// at every mutation site — see `total_scaled_debt`.
         pub total_debt: Balance,
+        /// Total outstanding debt in scaled units (the Aave `drawnShares`
+        /// analog). This is the source of truth: borrow/repay/liquidate add or
+        /// subtract the SAME scaled value here and on the user position, so the
+        /// market total and the sum of per-user scaled positions move in exact
+        /// lockstep and can never drift. Face `total_debt` is recomputed from
+        /// this value on every mutation, and interest accrues into it purely
+        /// through borrow_index growth (no explicit total mutation).
+        pub total_scaled_debt: Balance,
         /// Accumulator for per-user scaled debt: user_debt = scaled_debt × borrow_index.
         /// Starts at 1.0 (1e18); grows at the borrow rate.
         pub borrow_index: Ratio,
@@ -135,6 +155,7 @@ mod lending_pool {
             Self {
                 total_supplied: 0,
                 total_debt: 0,
+                total_scaled_debt: 0,
                 borrow_index: Ratio::one(),
                 exchange_rate: Ratio::one(),
                 reserve_accrued: 0,
@@ -1437,8 +1458,14 @@ mod lending_pool {
                 .ok_or(Error::ArithmeticError)?;
 
             let mut state = state;
-            state.total_debt =
-                state.total_debt.checked_add(amount).ok_or(Error::ArithmeticError)?;
+            // Lockstep scaled accounting: the market total gains the SAME
+            // scaled units as the position (Aave: total and user shares move
+            // together), so the ledger can never drift. The face total is
+            // derived from the scaled total for consumers (utilization, caps).
+            state.total_scaled_debt =
+                state.total_scaled_debt.checked_add(scaled).ok_or(Error::ArithmeticError)?;
+            state.total_debt = scaled_debt_to_face(state.total_scaled_debt, state.borrow_index)
+                .ok_or(Error::ArithmeticError)?;
             self.markets.insert(0, &state);
 
             let mut pos = self.positions.get((0, caller)).unwrap_or(Position {
@@ -1517,8 +1544,12 @@ mod lending_pool {
                 .ok_or(Error::ArithmeticError)?;
 
             let mut state = state;
-            state.total_debt =
-                state.total_debt.checked_add(amount).ok_or(Error::ArithmeticError)?;
+            // Lockstep scaled accounting (see borrow_tao): the market total
+            // gains the SAME scaled units as the position.
+            state.total_scaled_debt =
+                state.total_scaled_debt.checked_add(scaled).ok_or(Error::ArithmeticError)?;
+            state.total_debt = scaled_debt_to_face(state.total_scaled_debt, state.borrow_index)
+                .ok_or(Error::ArithmeticError)?;
             self.markets.insert(1, &state);
 
             let mut pos = self.positions.get((1, caller)).unwrap_or(Position {
@@ -1577,22 +1608,12 @@ mod lending_pool {
                 return Ok(());
             }
 
-            // Respect the market's tracked total debt. Ledger drift from
-            // historical scaling bugs can leave total_debt below the sum of
-            // user positions; subtracting more would underflow into
-            // ArithmeticError.
-            let repay_amount = min(repay_amount, state.total_debt);
-            if repay_amount == 0 {
-                self.set_idle();
-                return Ok(());
-            }
-
             // scaled_repaid = repay_amount / borrow_index, rounded UP (Aave
             // rayDivUp). A full repayment clears the position exactly, since
             // floor division would otherwise strand the last sub-index unit of
             // debt forever; a partial repayment must never erase the position
-            // through rounding. Clamped to the position so a drifted ledger
-            // can never underflow the subtraction.
+            // through rounding. Clamped to the position so the subtraction can
+            // never underflow.
             let scaled_repaid = if repay_amount >= debt {
                 pos.scaled_debt
             } else {
@@ -1627,8 +1648,13 @@ mod lending_pool {
 
             // Effects
             let mut state = state;
-            state.total_debt =
-                state.total_debt.checked_sub(repay_amount).ok_or(Error::ArithmeticError)?;
+            // Lockstep scaled accounting (see borrow_tao): the market total
+            // loses the SAME scaled units as the position, so a full repayment
+            // drives both to exactly zero.
+            state.total_scaled_debt =
+                state.total_scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
+            state.total_debt = scaled_debt_to_face(state.total_scaled_debt, state.borrow_index)
+                .ok_or(Error::ArithmeticError)?;
             self.markets.insert(0, &state);
 
             let mut pos = pos;
@@ -1686,22 +1712,12 @@ mod lending_pool {
                 return Ok(());
             }
 
-            // Respect the market's tracked total debt. Ledger drift from
-            // historical scaling bugs can leave total_debt below the sum of
-            // user positions; subtracting more would underflow into
-            // ArithmeticError.
-            let repay_amount = min(repay_amount, state.total_debt);
-            if repay_amount == 0 {
-                self.set_idle();
-                return Ok(());
-            }
-
             // scaled_repaid = repay_amount / borrow_index, rounded UP (Aave
             // rayDivUp). A full repayment clears the position exactly, since
             // floor division would otherwise strand the last sub-index unit of
             // debt forever; a partial repayment must never erase the position
-            // through rounding. Clamped to the position so a drifted ledger
-            // can never underflow the subtraction.
+            // through rounding. Clamped to the position so the subtraction can
+            // never underflow.
             let scaled_repaid = if repay_amount >= debt {
                 pos.scaled_debt
             } else {
@@ -1730,8 +1746,13 @@ mod lending_pool {
 
             // Effects
             let mut state = state;
-            state.total_debt =
-                state.total_debt.checked_sub(repay_amount).ok_or(Error::ArithmeticError)?;
+            // Lockstep scaled accounting (see borrow_tao): the market total
+            // loses the SAME scaled units as the position, so a full repayment
+            // drives both to exactly zero.
+            state.total_scaled_debt =
+                state.total_scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
+            state.total_debt = scaled_debt_to_face(state.total_scaled_debt, state.borrow_index)
+                .ok_or(Error::ArithmeticError)?;
             self.markets.insert(1, &state);
 
             let mut pos = pos;
@@ -2076,10 +2097,8 @@ mod lending_pool {
             } else {
                 min(cover_tusdt, borrower_debt)
             };
-            // Respect the market's tracked total debt: never cover more debt
-            // than the market accounts for, or the subtraction underflows into
-            // ArithmeticError on a drifted ledger.
-            let actual_debt_units = min(actual_debt_units, state.total_debt);
+            // Never cover more than the borrower's actual debt; a zero amount
+            // (e.g. cover floor) has nothing to liquidate.
             if actual_debt_units == 0 {
                 self.set_idle();
                 return Err(Error::ZeroAmount);
@@ -2129,8 +2148,12 @@ mod lending_pool {
             );
 
             let mut state = state;
-            state.total_debt =
-                state.total_debt.checked_sub(actual_debt_units).ok_or(Error::ArithmeticError)?;
+            // Lockstep scaled accounting (see borrow_tao): the market total
+            // loses the SAME scaled units as the borrower's position.
+            state.total_scaled_debt =
+                state.total_scaled_debt.checked_sub(scaled_repaid).ok_or(Error::ArithmeticError)?;
+            state.total_debt = scaled_debt_to_face(state.total_scaled_debt, state.borrow_index)
+                .ok_or(Error::ArithmeticError)?;
             self.markets.insert(debt_market, &state);
 
             let mut pos = pos;
